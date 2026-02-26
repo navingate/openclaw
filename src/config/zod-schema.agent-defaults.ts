@@ -21,6 +21,11 @@ export const AgentDefaultsSchema = z
     pdfModel: AgentModelSchema.optional(),
     pdfMaxBytesMb: z.number().positive().optional(),
     pdfMaxPages: z.number().int().positive().optional(),
+    guardModel: AgentModelSchema.optional(),
+    guardModelAction: z
+      .union([z.literal("block"), z.literal("redact"), z.literal("warn")])
+      .optional(),
+    guardModelOnError: z.union([z.literal("allow"), z.literal("block")]).optional(),
     models: z
       .record(
         z.string(),
