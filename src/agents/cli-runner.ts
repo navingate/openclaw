@@ -40,6 +40,7 @@ import {
   applyGuardToInput,
   resolveOutputGuardModelConfig,
   resolveInputGuardModelConfig,
+  type ReplyPayload,
 } from "./guard-model.js";
 import {
   classifyFailoverReason,
@@ -411,6 +412,8 @@ export async function runCliAgent(params: {
     }
   };
 
+  let inputGuardPayloads: ReplyPayload[] = [];
+
   // Input guard screening — check user message before invoking the CLI backend
   const inputGuardConfig = resolveInputGuardModelConfig(params.config);
   if (inputGuardConfig) {
@@ -431,19 +434,30 @@ export async function runCliAgent(params: {
         },
       };
     }
+    // Honor non-blocking input-guard actions (warn, redact)
+    if (inputCheck.payloads.length > 0) {
+      inputGuardPayloads = inputCheck.payloads;
+    }
   }
+
+  const outputGuardConfig = resolveOutputGuardModelConfig(params.config);
 
   // Try with the provided CLI session ID first
   try {
     const output = await executeCliWithSession(params.cliSessionId);
     const text = output.text?.trim();
     let payloads: EmbeddedPiRunResult["payloads"] = text ? [{ text }] : undefined;
-    const outputGuardConfig = resolveOutputGuardModelConfig(params.config);
     if (outputGuardConfig && payloads?.length) {
       payloads = await applyGuardToPayloads(payloads, outputGuardConfig, {
         cfg: params.config,
         agentDir: params.agentDir,
       });
+    }
+
+    if (inputGuardPayloads.length > 0 && payloads) {
+      payloads = [...inputGuardPayloads, ...payloads];
+    } else if (inputGuardPayloads.length > 0) {
+      payloads = inputGuardPayloads;
     }
 
     return {
@@ -467,14 +481,24 @@ export async function runCliAgent(params: {
           `CLI session expired, clearing session ID and retrying: provider=${params.provider} session=${redactRunIdentifier(params.cliSessionId)}`,
         );
 
-        // Clear the expired session ID from the session entry
-        // This requires access to the session store, which we don't have here
-        // We'll need to modify the caller to handle this case
-
         // For now, retry without the session ID to create a new session
         const output = await executeCliWithSession(undefined);
         const text = output.text?.trim();
-        const payloads = text ? [{ text }] : undefined;
+        let payloads: EmbeddedPiRunResult["payloads"] = text ? [{ text }] : undefined;
+
+        // P1: output guard screening on retry path
+        if (outputGuardConfig && payloads?.length) {
+          payloads = await applyGuardToPayloads(payloads, outputGuardConfig, {
+            cfg: params.config,
+            agentDir: params.agentDir,
+          });
+        }
+
+        if (inputGuardPayloads.length > 0 && payloads) {
+          payloads = [...inputGuardPayloads, ...payloads];
+        } else if (inputGuardPayloads.length > 0) {
+          payloads = inputGuardPayloads;
+        }
 
         return {
           payloads,

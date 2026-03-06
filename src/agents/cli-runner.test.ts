@@ -9,8 +9,10 @@ import { resolveCliNoOutputTimeoutMs } from "./cli-runner/helpers.js";
 const supervisorSpawnMock = vi.fn();
 const enqueueSystemEventMock = vi.fn();
 const requestHeartbeatNowMock = vi.fn();
-const resolveGuardModelConfigMock = vi.fn();
+const resolveInputGuardModelConfigMock = vi.fn();
+const resolveOutputGuardModelConfigMock = vi.fn();
 const applyGuardToPayloadsMock = vi.fn();
+const applyGuardToInputMock = vi.fn();
 
 vi.mock("../process/supervisor/index.js", () => ({
   getProcessSupervisor: () => ({
@@ -31,8 +33,11 @@ vi.mock("../infra/heartbeat-wake.js", () => ({
 }));
 
 vi.mock("./guard-model.js", () => ({
-  resolveGuardModelConfig: (...args: unknown[]) => resolveGuardModelConfigMock(...args),
+  resolveInputGuardModelConfig: (...args: unknown[]) => resolveInputGuardModelConfigMock(...args),
+  resolveOutputGuardModelConfig: (...args: unknown[]) => resolveOutputGuardModelConfigMock(...args),
+  resolveGuardModelConfig: (...args: unknown[]) => resolveOutputGuardModelConfigMock(...args),
   applyGuardToPayloads: (...args: unknown[]) => applyGuardToPayloadsMock(...args),
+  applyGuardToInput: (...args: unknown[]) => applyGuardToInputMock(...args),
 }));
 
 type MockRunExit = {
@@ -68,9 +73,13 @@ describe("runCliAgent with process supervisor", () => {
     supervisorSpawnMock.mockClear();
     enqueueSystemEventMock.mockClear();
     requestHeartbeatNowMock.mockClear();
-    resolveGuardModelConfigMock.mockReset();
+    resolveInputGuardModelConfigMock.mockReset();
+    resolveOutputGuardModelConfigMock.mockReset();
     applyGuardToPayloadsMock.mockReset();
-    resolveGuardModelConfigMock.mockReturnValue(null);
+    applyGuardToInputMock.mockReset();
+    resolveInputGuardModelConfigMock.mockReturnValue(null);
+    resolveOutputGuardModelConfigMock.mockReturnValue(null);
+    applyGuardToInputMock.mockResolvedValue({ blocked: false });
     applyGuardToPayloadsMock.mockImplementation(async (payloads: unknown) => payloads);
   });
 
@@ -332,7 +341,7 @@ describe("runCliAgent with process supervisor", () => {
       action: "block" as const,
       onError: "allow" as const,
     };
-    resolveGuardModelConfigMock.mockReturnValue(guardConfig);
+    resolveOutputGuardModelConfigMock.mockReturnValue(guardConfig);
     applyGuardToPayloadsMock.mockResolvedValueOnce([
       { text: "⚠️ This response was blocked by the content safety guard.", isError: true },
     ]);
@@ -350,7 +359,7 @@ describe("runCliAgent with process supervisor", () => {
       agentDir: "/tmp/agent",
     });
 
-    expect(resolveGuardModelConfigMock).toHaveBeenCalledWith(cfg);
+    expect(resolveOutputGuardModelConfigMock).toHaveBeenCalledWith(cfg);
     expect(applyGuardToPayloadsMock).toHaveBeenCalledWith([{ text: "ok" }], guardConfig, {
       cfg,
       agentDir: "/tmp/agent",
