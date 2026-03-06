@@ -176,6 +176,65 @@ describe("runConfigureWizard", () => {
     );
   });
 
+  it("removes legacy guard fields when disabling output guard", async () => {
+    mocks.readConfigFileSnapshot.mockResolvedValue({
+      exists: true,
+      valid: true,
+      config: {
+        agents: {
+          defaults: {
+            guardModel: "openai/gpt-4o-mini",
+            guardModelAction: "block",
+            guardModelOnError: "allow",
+            guardModelMaxInputChars: 32000,
+            outputGuardModel: "openai/gpt-4o-mini",
+            outputGuardModelAction: "block",
+            outputGuardModelOnError: "allow",
+            outputGuardModelMaxInputChars: 32000,
+          },
+        },
+      },
+      issues: [],
+    });
+    mocks.resolveGatewayPort.mockReturnValue(18789);
+    mocks.probeGatewayReachable.mockResolvedValue({ ok: false });
+    mocks.ensureControlUiAssetsBuilt.mockResolvedValue({ ok: true });
+    mocks.resolveControlUiLinks.mockReturnValue({ wsUrl: "ws://127.0.0.1:18789" });
+    mocks.summarizeExistingConfig.mockReturnValue("");
+    mocks.createClackPrompter.mockReturnValue({});
+    mocks.clackIntro.mockResolvedValue(undefined);
+    mocks.clackOutro.mockResolvedValue(undefined);
+    mocks.clackSelect.mockResolvedValue("local");
+    // Skip input guard (false), disable output guard (false)
+    mocks.clackConfirm.mockResolvedValue(false);
+
+    await runConfigureWizard(
+      { command: "update", sections: ["guard-model"] },
+      {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn(),
+      },
+    );
+
+    expect(mocks.writeConfigFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agents: expect.objectContaining({
+          defaults: expect.not.objectContaining({
+            guardModel: expect.anything(),
+            guardModelAction: expect.anything(),
+            guardModelOnError: expect.anything(),
+            guardModelMaxInputChars: expect.anything(),
+            outputGuardModel: expect.anything(),
+            outputGuardModelAction: expect.anything(),
+            outputGuardModelOnError: expect.anything(),
+            outputGuardModelMaxInputChars: expect.anything(),
+          }),
+        }),
+      }),
+    );
+  });
+
   it("keeps existing guard settings when selected guard model is malformed", async () => {
     mocks.readConfigFileSnapshot.mockResolvedValue({
       exists: true,

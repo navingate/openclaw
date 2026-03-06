@@ -379,6 +379,7 @@ async function promptInputGuardModelConfig(
             inputGuardModel: undefined,
             inputGuardModelAction: undefined,
             inputGuardModelOnError: undefined,
+            inputGuardModelMaxInputChars: undefined,
           },
         },
       };

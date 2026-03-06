@@ -536,6 +536,46 @@ describe("guard-model", () => {
       expect(result.blocked).toBe(false);
       expect(result.result.source).toBe("error");
     });
+
+    it("returns blocked=false with warning annotation when action is warn and content is unsafe", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        jsonGuardReply('{"safe":false,"reason":"harmful","categories":["harmful"]}'),
+      );
+      const result = await applyGuardToInput(
+        "unsafe input",
+        {
+          ...BASE_GUARD_CONFIG,
+          action: "warn",
+        },
+        { cfg: TEST_RUNTIME_CONFIG },
+      );
+
+      expect(result.blocked).toBe(false);
+      expect(result.payloads).toHaveLength(1);
+      expect(result.payloads[0]?.isError).toBe(true);
+      expect(result.payloads[0]?.text).toContain("safety warning");
+      expect(result.payloads[0]?.text).toContain("harmful");
+    });
+
+    it("returns blocked=false with redacted message when action is redact and content is unsafe", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        jsonGuardReply('{"safe":false,"reason":"sensitive","categories":["sensitive"]}'),
+      );
+      const result = await applyGuardToInput(
+        "sensitive input",
+        {
+          ...BASE_GUARD_CONFIG,
+          action: "redact",
+        },
+        { cfg: TEST_RUNTIME_CONFIG },
+      );
+
+      expect(result.blocked).toBe(false);
+      expect(result.payloads).toHaveLength(1);
+      expect(result.payloads[0]?.isError).toBe(true);
+      expect(result.payloads[0]?.text).toContain("redaction");
+      expect(result.payloads[0]?.text).toContain("sensitive");
+    });
   });
 
   describe("base URL resolution", () => {

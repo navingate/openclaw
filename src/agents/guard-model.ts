@@ -769,11 +769,49 @@ export async function applyGuardToInput(
       (result.categories?.length ? ` [${result.categories.join(", ")}]` : ""),
   );
 
-  return {
-    blocked: true,
-    result,
-    payloads: buildInputBlockedPayload(result.reason, text),
-  };
+  switch (config.action) {
+    case "block":
+      return {
+        blocked: true,
+        result,
+        payloads: buildInputBlockedPayload(result.reason, text),
+      };
+
+    case "redact":
+      return {
+        blocked: false,
+        result,
+        payloads: [
+          {
+            text:
+              `⚠️ Input safety redaction: ${result.reason ?? "sensitive content flagged"}` +
+              (result.categories?.length ? ` [${result.categories.join(", ")}]` : ""),
+            isError: true,
+          },
+        ],
+      };
+
+    case "warn":
+      return {
+        blocked: false,
+        result,
+        payloads: [
+          {
+            text:
+              `⚠️ Input safety warning: ${result.reason ?? "potential safety concern"}` +
+              (result.categories?.length ? ` [${result.categories.join(", ")}]` : ""),
+            isError: true,
+          },
+        ],
+      };
+
+    default:
+      return {
+        blocked: true,
+        result,
+        payloads: buildInputBlockedPayload(result.reason, text),
+      };
+  }
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
