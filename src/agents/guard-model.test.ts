@@ -28,6 +28,7 @@ const TEST_RUNTIME_CONFIG: OpenClawConfig = {
 const BASE_GUARD_CONFIG: GuardModelConfig = {
   provider: TEST_PROVIDER,
   modelId: "test-model",
+  modelRef: `${TEST_PROVIDER}/test-model`,
   action: "block",
   onError: "allow",
 };
@@ -77,6 +78,11 @@ function parseJsonRequestBody(init: RequestInit | undefined): {
   };
 }
 
+function extractClassifiedContent(prompt: string): string {
+  const prefix = "Classify this content:\n\n";
+  return prompt.startsWith(prefix) ? prompt.slice(prefix.length) : prompt;
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -102,6 +108,21 @@ describe("guard-model", () => {
       expect(res).toEqual({
         provider: "chutes",
         modelId: "Qwen/Qwen3Guard",
+        modelRef: "chutes/Qwen/Qwen3Guard",
+        taxonomy: {
+          labels: ["Safe", "Unsafe", "Controversial"],
+          categories: [
+            "Violent",
+            "Non-violent Illegal Acts",
+            "Sexual Content or Sexual Acts",
+            "PII",
+            "Suicide & Self-Harm",
+            "Unethical Acts",
+            "Politically Sensitive Topics",
+            "Copyright Violation",
+            "None",
+          ],
+        },
         action: "block",
         onError: "allow",
       });
@@ -121,6 +142,21 @@ describe("guard-model", () => {
       expect(res).toEqual({
         provider: "chutes",
         modelId: "Qwen/Qwen3Guard",
+        modelRef: "chutes/Qwen/Qwen3Guard",
+        taxonomy: {
+          labels: ["Safe", "Unsafe", "Controversial"],
+          categories: [
+            "Violent",
+            "Non-violent Illegal Acts",
+            "Sexual Content or Sexual Acts",
+            "PII",
+            "Suicide & Self-Harm",
+            "Unethical Acts",
+            "Politically Sensitive Topics",
+            "Copyright Violation",
+            "None",
+          ],
+        },
         action: "warn",
         onError: "block",
       });
@@ -160,10 +196,58 @@ describe("guard-model", () => {
       expect(res).toEqual({
         provider: "openai",
         modelId: "gpt-4o-mini",
-        fallbacks: [{ provider: "openai", modelId: "gpt-4.1-mini" }],
+        modelRef: "openai/gpt-4o-mini",
+        fallbacks: [
+          {
+            provider: "openai",
+            modelId: "gpt-4.1-mini",
+            modelRef: "openai/gpt-4.1-mini",
+          },
+        ],
         action: "warn",
         onError: "block",
         maxInputChars: 64_000,
+      });
+    });
+
+    it("hydrates taxonomy and output policy from configured model metadata", () => {
+      const cfg: OpenClawConfig = {
+        agents: {
+          defaults: {
+            outputGuardModel: "chutes/Qwen/Qwen3Guard",
+            models: {
+              "chutes/Qwen/Qwen3Guard": {
+                guardTaxonomy: {
+                  labels: ["Safe", "Unsafe", "Controversial"],
+                  categories: ["Violent", "PII", "None"],
+                },
+              },
+            },
+            outputGuardPolicy: {
+              "chutes/Qwen/Qwen3Guard": {
+                enabledLabels: ["Unsafe"],
+                enabledCategories: ["PII"],
+              },
+            },
+          },
+        },
+      };
+
+      const res = resolveOutputGuardModelConfig(cfg);
+      expect(res).toEqual({
+        provider: "chutes",
+        modelId: "Qwen/Qwen3Guard",
+        modelRef: "chutes/Qwen/Qwen3Guard",
+        taxonomy: {
+          labels: ["Safe", "Unsafe", "Controversial"],
+          categories: ["Violent", "PII", "None"],
+        },
+        policy: {
+          enabledLabels: ["Unsafe"],
+          enabledCategories: ["PII"],
+        },
+        action: "block",
+        onError: "allow",
       });
     });
 
@@ -210,6 +294,21 @@ describe("guard-model", () => {
       expect(res).toEqual({
         provider: "chutes",
         modelId: "Qwen/Qwen3Guard",
+        modelRef: "chutes/Qwen/Qwen3Guard",
+        taxonomy: {
+          labels: ["Safe", "Unsafe", "Controversial"],
+          categories: [
+            "Violent",
+            "Non-violent Illegal Acts",
+            "Sexual Content or Sexual Acts",
+            "PII",
+            "Suicide & Self-Harm",
+            "Unethical Acts",
+            "Politically Sensitive Topics",
+            "Copyright Violation",
+            "None",
+          ],
+        },
         action: "block",
         onError: "allow",
       });
@@ -235,6 +334,21 @@ describe("guard-model", () => {
       expect(res).toEqual({
         provider: "chutes",
         modelId: "Qwen/Qwen3Guard",
+        modelRef: "chutes/Qwen/Qwen3Guard",
+        taxonomy: {
+          labels: ["Safe", "Unsafe", "Controversial"],
+          categories: [
+            "Violent",
+            "Non-violent Illegal Acts",
+            "Sexual Content or Sexual Acts",
+            "PII",
+            "Suicide & Self-Harm",
+            "Unethical Acts",
+            "Politically Sensitive Topics",
+            "Copyright Violation",
+            "None",
+          ],
+        },
         action: "block",
         onError: "allow",
       });
@@ -258,7 +372,14 @@ describe("guard-model", () => {
       expect(res).toEqual({
         provider: "openai",
         modelId: "gpt-4o-mini",
-        fallbacks: [{ provider: "openai", modelId: "gpt-4.1-mini" }],
+        modelRef: "openai/gpt-4o-mini",
+        fallbacks: [
+          {
+            provider: "openai",
+            modelId: "gpt-4.1-mini",
+            modelRef: "openai/gpt-4.1-mini",
+          },
+        ],
         action: "warn",
         onError: "block",
         maxInputChars: 16_000,
@@ -283,6 +404,7 @@ describe("guard-model", () => {
       const res = await applyGuardToPayloads(payloads, {
         provider: "chutes",
         modelId: "dummy",
+        modelRef: "chutes/dummy",
         action: "block",
         onError: "allow",
       });
@@ -394,7 +516,13 @@ describe("guard-model", () => {
         payloads,
         {
           ...BASE_GUARD_CONFIG,
-          fallbacks: [{ provider: TEST_PROVIDER, modelId: "fallback-model" }],
+          fallbacks: [
+            {
+              provider: TEST_PROVIDER,
+              modelId: "fallback-model",
+              modelRef: `${TEST_PROVIDER}/fallback-model`,
+            },
+          ],
         },
         {
           cfg: TEST_RUNTIME_CONFIG,
@@ -408,14 +536,64 @@ describe("guard-model", () => {
       expect(res[0]?.text).toContain("unsafe text");
     });
 
+    it("uses fallback model-specific policy selections when taxonomies differ", async () => {
+      vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(new Response("upstream error", { status: 500 }))
+        .mockResolvedValueOnce(
+          jsonGuardReply('{"label":"unsafe","categories":["S7: Privacy"],"reason":"privacy"}'),
+        );
+      const payloads: ReplyPayload[] = [{ text: "unsafe text" }];
+
+      const res = await applyGuardToPayloads(
+        payloads,
+        {
+          ...BASE_GUARD_CONFIG,
+          taxonomy: {
+            labels: ["Safe", "Unsafe", "Controversial"],
+            categories: ["Violent", "PII", "None"],
+          },
+          policy: {
+            enabledLabels: ["Unsafe"],
+            enabledCategories: ["PII"],
+          },
+          fallbacks: [
+            {
+              provider: TEST_PROVIDER,
+              modelId: "llama-fallback",
+              modelRef: `${TEST_PROVIDER}/llama-fallback`,
+              taxonomy: {
+                labels: ["safe", "unsafe"],
+                categories: ["S7: Privacy", "S10: Hate"],
+              },
+              policy: {
+                enabledLabels: ["unsafe"],
+                enabledCategories: ["S7: Privacy"],
+              },
+            },
+          ],
+        },
+        {
+          cfg: TEST_RUNTIME_CONFIG,
+        },
+      );
+
+      expect(res).toHaveLength(1);
+      expect(res[0]?.isError).toBe(true);
+      expect(res[0]?.text).toContain("S7: Privacy");
+    });
+
     it("caps oversized guard input with trailing [truncated] marker and annotates fail-open output", async () => {
       vi.spyOn(globalThis, "fetch").mockImplementationOnce(async (_url, init) => {
         const request = parseJsonRequestBody(init);
-        // Content is passed directly as the user message (no system prompt prefix)
         const userMessage =
           request.messages?.find((message) => message.role === "user")?.content ?? "";
-        expect(userMessage.length).toBeLessThanOrEqual(64);
-        expect(userMessage.endsWith("[truncated]")).toBe(true);
+        const systemMessage =
+          request.messages?.find((message) => message.role === "system")?.content ?? "";
+        const classifiedContent = extractClassifiedContent(userMessage);
+        expect(classifiedContent.length).toBeLessThanOrEqual(64);
+        expect(classifiedContent.endsWith("[truncated]")).toBe(true);
+        expect(systemMessage).toContain("Supported labels:");
+        expect(systemMessage).toContain("Enabled labels for enforcement:");
         return new Response("upstream error", { status: 500 });
       });
       const oversized = "A".repeat(320);
@@ -600,7 +778,13 @@ describe("guard-model", () => {
 
       const res = await applyGuardToPayloads(
         [{ text: "assistant reply" }],
-        { provider: "moonshot", modelId: "kimi-k2.5", action: "block", onError: "allow" },
+        {
+          provider: "moonshot",
+          modelId: "kimi-k2.5",
+          modelRef: "moonshot/kimi-k2.5",
+          action: "block",
+          onError: "allow",
+        },
         { cfg },
       );
 
@@ -631,7 +815,13 @@ describe("guard-model", () => {
 
       const res = await applyGuardToPayloads(
         [{ text: "assistant reply" }],
-        { provider: "moonshot", modelId: "kimi-k2.5", action: "block", onError: "allow" },
+        {
+          provider: "moonshot",
+          modelId: "kimi-k2.5",
+          modelRef: "moonshot/kimi-k2.5",
+          action: "block",
+          onError: "allow",
+        },
         { cfg },
       );
 
@@ -664,6 +854,128 @@ describe("guard-model", () => {
 
       expect(res.safe).toBe(true);
       expect(res.source).toBe("error");
+    });
+
+    it("parses provider-native label/categories and derives unsafe from enabled selections", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        jsonGuardReply('{"label":"Unsafe","categories":["PII"],"reason":"contains personal data"}'),
+      );
+
+      const res = await evaluateGuard(
+        "reply text",
+        {
+          ...BASE_GUARD_CONFIG,
+          taxonomy: {
+            labels: ["Safe", "Unsafe", "Controversial"],
+            categories: ["Violent", "PII", "None"],
+          },
+          policy: {
+            enabledLabels: ["Unsafe"],
+            enabledCategories: ["PII"],
+          },
+        },
+        {
+          cfg: TEST_RUNTIME_CONFIG,
+        },
+      );
+
+      expect(res.safe).toBe(false);
+      expect(res.label).toBe("Unsafe");
+      expect(res.categories).toEqual(["PII"]);
+      expect(res.reason).toBe("contains personal data");
+      expect(res.source).toBe("classification");
+    });
+
+    it("treats safe-equivalent labels and None categories as non-triggering", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        jsonGuardReply('{"label":"Safe","categories":["None"],"reason":"benign"}'),
+      );
+
+      const res = await evaluateGuard(
+        "reply text",
+        {
+          ...BASE_GUARD_CONFIG,
+          taxonomy: {
+            labels: ["Safe", "Unsafe"],
+            categories: ["None", "PII"],
+          },
+          policy: {
+            enabledLabels: ["Unsafe"],
+            enabledCategories: ["PII"],
+          },
+        },
+        {
+          cfg: TEST_RUNTIME_CONFIG,
+        },
+      );
+
+      expect(res.safe).toBe(true);
+      expect(res.label).toBe("Safe");
+      expect(res.categories).toEqual(["None"]);
+    });
+
+    it("does not trigger when provider-native labels/categories are disabled for enforcement", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        jsonGuardReply(
+          '{"label":"Controversial","categories":["Politically Sensitive Topics"],"reason":"topic"}',
+        ),
+      );
+
+      const res = await evaluateGuard(
+        "reply text",
+        {
+          ...BASE_GUARD_CONFIG,
+          taxonomy: {
+            labels: ["Safe", "Unsafe", "Controversial"],
+            categories: ["Politically Sensitive Topics", "PII", "None"],
+          },
+          policy: {
+            enabledLabels: ["Unsafe"],
+            enabledCategories: ["PII"],
+          },
+        },
+        {
+          cfg: TEST_RUNTIME_CONFIG,
+        },
+      );
+
+      expect(res.safe).toBe(true);
+      expect(res.label).toBe("Controversial");
+      expect(res.categories).toEqual(["Politically Sensitive Topics"]);
+    });
+
+    it("keeps provider-native labels/categories in the guard request body", async () => {
+      vi.spyOn(globalThis, "fetch").mockImplementationOnce(async (_url, init) => {
+        const request = parseJsonRequestBody(init);
+        const systemMessage =
+          request.messages?.find((message) => message.role === "system")?.content ?? "";
+        expect(systemMessage).toContain("Supported labels: Safe, Unsafe, Controversial");
+        expect(systemMessage).toContain("Supported categories: Violent, PII, None");
+        expect(systemMessage).toContain("Enabled labels for enforcement: Unsafe");
+        expect(systemMessage).toContain("Enabled categories for enforcement: PII");
+        return jsonGuardReply('{"label":"Safe","categories":["None"]}');
+      });
+
+      const res = await evaluateGuard(
+        "reply text",
+        {
+          ...BASE_GUARD_CONFIG,
+          taxonomy: {
+            labels: ["Safe", "Unsafe", "Controversial"],
+            categories: ["Violent", "PII", "None"],
+          },
+          policy: {
+            enabledLabels: ["Unsafe"],
+            enabledCategories: ["PII"],
+          },
+        },
+        {
+          cfg: TEST_RUNTIME_CONFIG,
+        },
+      );
+
+      expect(res.safe).toBe(true);
+      expect(res.source).toBe("classification");
     });
 
     it("clears timeout when fetch rejects", async () => {
@@ -710,10 +1022,11 @@ describe("guard-model", () => {
     it("uses default max guard input chars when no override is configured", async () => {
       vi.spyOn(globalThis, "fetch").mockImplementationOnce(async (_url, init) => {
         const request = parseJsonRequestBody(init);
-        // Content is passed directly as the user message (no system prompt prefix)
         const userMessage =
           request.messages?.find((message) => message.role === "user")?.content ?? "";
-        expect(userMessage.length).toBeLessThanOrEqual(DEFAULT_GUARD_MAX_INPUT_CHARS);
+        expect(extractClassifiedContent(userMessage).length).toBeLessThanOrEqual(
+          DEFAULT_GUARD_MAX_INPUT_CHARS,
+        );
         return jsonGuardReply('{"safe":true}');
       });
 

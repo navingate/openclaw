@@ -10,11 +10,24 @@ import type { MemorySearchConfig } from "./types.tools.js";
 
 export type AgentModelEntryConfig = {
   alias?: string;
+  guardTaxonomy?: GuardTaxonomyConfig;
   /** Provider-specific API parameters (e.g., GLM-4.7 thinking mode). */
   params?: Record<string, unknown>;
   /** Enable streaming for this model (default: true, false for Ollama to avoid SDK issue #1205). */
   streaming?: boolean;
 };
+
+export type GuardTaxonomyConfig = {
+  labels?: string[];
+  categories?: string[];
+};
+
+export type GuardPolicySelectionConfig = {
+  enabledLabels?: string[];
+  enabledCategories?: string[];
+};
+
+export type GuardPolicyMapConfig = Record<string, GuardPolicySelectionConfig>;
 
 export type AgentModelListConfig = {
   primary?: string;
@@ -138,6 +151,8 @@ export type AgentDefaultsConfig = {
   guardModelMaxInputChars?: number;
   /** Optional guard/safety model for screening user input before it reaches the LLM (provider/model). Accepts string or {primary,fallbacks}. */
   inputGuardModel?: AgentModelConfig;
+  /** Per-model input guard policy selection keyed by provider/model. */
+  inputGuardPolicy?: GuardPolicyMapConfig;
   /** Input guard model behavior when content is flagged as unsafe (default: "block"). */
   inputGuardModelAction?: "block" | "redact" | "warn";
   /** Input guard model behavior on API failure (default: "allow" — fail open). */
@@ -146,6 +161,8 @@ export type AgentDefaultsConfig = {
   inputGuardModelMaxInputChars?: number;
   /** Optional guard/safety model for screening LLM output before delivery (provider/model). Accepts string or {primary,fallbacks}. */
   outputGuardModel?: AgentModelConfig;
+  /** Per-model output guard policy selection keyed by provider/model. */
+  outputGuardPolicy?: GuardPolicyMapConfig;
   /** Output guard model behavior when content is flagged as unsafe (default: "block"). */
   outputGuardModelAction?: "block" | "redact" | "warn";
   /** Output guard model behavior on API failure (default: "allow" — fail open). */

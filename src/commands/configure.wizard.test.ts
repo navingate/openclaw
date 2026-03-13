@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 
 const mocks = vi.hoisted(() => ({
@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   clackSelect: vi.fn(),
   clackText: vi.fn(),
   clackConfirm: vi.fn(),
+  prompterText: vi.fn(),
+  prompterMultiselect: vi.fn(),
   readConfigFileSnapshot: vi.fn(),
   writeConfigFile: vi.fn(),
   resolveGatewayPort: vi.fn(),
@@ -109,6 +111,14 @@ import { WizardCancelledError } from "../wizard/prompts.js";
 import { runConfigureWizard } from "./configure.wizard.js";
 
 describe("runConfigureWizard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.createClackPrompter.mockReturnValue({
+      text: mocks.prompterText,
+      multiselect: mocks.prompterMultiselect,
+    });
+  });
+
   it("preserves guard model fallbacks when updating guard settings", async () => {
     mocks.readConfigFileSnapshot.mockResolvedValue({
       exists: true,
@@ -117,8 +127,8 @@ describe("runConfigureWizard", () => {
         agents: {
           defaults: {
             guardModel: {
-              primary: "openai/gpt-4o-mini",
-              fallbacks: ["openai/gpt-4.1-mini"],
+              primary: "chutes/Qwen/Qwen3Guard",
+              fallbacks: ["openrouter/meta-llama/llama-guard-3-8b"],
             },
             guardModelAction: "block",
             guardModelOnError: "allow",
@@ -132,12 +142,24 @@ describe("runConfigureWizard", () => {
     mocks.ensureControlUiAssetsBuilt.mockResolvedValue({ ok: true });
     mocks.resolveControlUiLinks.mockReturnValue({ wsUrl: "ws://127.0.0.1:18789" });
     mocks.summarizeExistingConfig.mockReturnValue("");
-    mocks.createClackPrompter.mockReturnValue({});
-    mocks.promptGuardModel.mockResolvedValue({ model: "openai/gpt-4o-mini" });
+    mocks.promptGuardModel.mockResolvedValue({ model: "chutes/Qwen/Qwen3Guard" });
     mocks.resolveGuardModelRefCompatibility.mockReturnValue({
       compatible: true,
       api: "openai-completions",
     });
+    mocks.prompterMultiselect
+      .mockResolvedValueOnce(["Safe", "Unsafe", "Controversial"])
+      .mockResolvedValueOnce([
+        "Violent",
+        "Non-violent Illegal Acts",
+        "Sexual Content or Sexual Acts",
+        "PII",
+        "Suicide & Self-Harm",
+        "Unethical Acts",
+        "Politically Sensitive Topics",
+        "Copyright Violation",
+        "None",
+      ]);
 
     const selectQueue = ["local", "warn", "block"];
     mocks.clackSelect.mockImplementation(async () => selectQueue.shift());
@@ -160,9 +182,29 @@ describe("runConfigureWizard", () => {
         agents: expect.objectContaining({
           defaults: expect.objectContaining({
             outputGuardModel: {
-              primary: "openai/gpt-4o-mini",
-              fallbacks: ["openai/gpt-4.1-mini"],
+              primary: "chutes/Qwen/Qwen3Guard",
+              fallbacks: ["openrouter/meta-llama/llama-guard-3-8b"],
             },
+            outputGuardPolicy: expect.objectContaining({
+              "chutes/Qwen/Qwen3Guard": expect.objectContaining({
+                enabledLabels: ["Safe", "Unsafe", "Controversial"],
+              }),
+              "openrouter/meta-llama/llama-guard-3-8b": expect.objectContaining({
+                enabledLabels: ["safe", "unsafe"],
+              }),
+            }),
+            models: expect.objectContaining({
+              "chutes/Qwen/Qwen3Guard": expect.objectContaining({
+                guardTaxonomy: expect.objectContaining({
+                  labels: ["Safe", "Unsafe", "Controversial"],
+                }),
+              }),
+              "openrouter/meta-llama/llama-guard-3-8b": expect.objectContaining({
+                guardTaxonomy: expect.objectContaining({
+                  labels: ["safe", "unsafe"],
+                }),
+              }),
+            }),
             outputGuardModelAction: "warn",
             outputGuardModelOnError: "block",
           }),
@@ -172,6 +214,140 @@ describe("runConfigureWizard", () => {
     expect(mocks.promptGuardModel).toHaveBeenCalledWith(
       expect.objectContaining({
         message: "Output guard model",
+      }),
+    );
+  });
+
+  it("stores separate input and output guard policy selections for the same model", async () => {
+    mocks.readConfigFileSnapshot.mockResolvedValue({
+      exists: true,
+      valid: true,
+      config: {
+        agents: {
+          defaults: {},
+        },
+      },
+      issues: [],
+    });
+    mocks.resolveGatewayPort.mockReturnValue(18789);
+    mocks.probeGatewayReachable.mockResolvedValue({ ok: false });
+    mocks.ensureControlUiAssetsBuilt.mockResolvedValue({ ok: true });
+    mocks.resolveControlUiLinks.mockReturnValue({ wsUrl: "ws://127.0.0.1:18789" });
+    mocks.summarizeExistingConfig.mockReturnValue("");
+    mocks.promptGuardModel
+      .mockResolvedValueOnce({ model: "chutes/Qwen/Qwen3Guard" })
+      .mockResolvedValueOnce({ model: "chutes/Qwen/Qwen3Guard" });
+    mocks.resolveGuardModelRefCompatibility.mockReturnValue({
+      compatible: true,
+      api: "openai-completions",
+    });
+    mocks.prompterMultiselect
+      .mockResolvedValueOnce(["Unsafe"])
+      .mockResolvedValueOnce(["PII"])
+      .mockResolvedValueOnce(["Controversial"])
+      .mockResolvedValueOnce(["Politically Sensitive Topics"]);
+
+    const selectQueue = ["local", "block", "allow", "warn", "block"];
+    mocks.clackSelect.mockImplementation(async () => selectQueue.shift());
+    mocks.clackIntro.mockResolvedValue(undefined);
+    mocks.clackOutro.mockResolvedValue(undefined);
+    mocks.clackConfirm.mockResolvedValue(true);
+
+    await runConfigureWizard(
+      { command: "update", sections: ["guard-model"] },
+      {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn(),
+      },
+    );
+
+    expect(mocks.writeConfigFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agents: expect.objectContaining({
+          defaults: expect.objectContaining({
+            inputGuardPolicy: {
+              "chutes/Qwen/Qwen3Guard": {
+                enabledLabels: ["Unsafe"],
+                enabledCategories: ["PII"],
+              },
+            },
+            outputGuardPolicy: {
+              "chutes/Qwen/Qwen3Guard": {
+                enabledLabels: ["Controversial"],
+                enabledCategories: ["Politically Sensitive Topics"],
+              },
+            },
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("prompts for unknown guard model taxonomy and persists it", async () => {
+    mocks.readConfigFileSnapshot.mockResolvedValue({
+      exists: true,
+      valid: true,
+      config: {
+        agents: {
+          defaults: {},
+        },
+      },
+      issues: [],
+    });
+    mocks.resolveGatewayPort.mockReturnValue(18789);
+    mocks.probeGatewayReachable.mockResolvedValue({ ok: false });
+    mocks.ensureControlUiAssetsBuilt.mockResolvedValue({ ok: true });
+    mocks.resolveControlUiLinks.mockReturnValue({ wsUrl: "ws://127.0.0.1:18789" });
+    mocks.summarizeExistingConfig.mockReturnValue("");
+    mocks.promptGuardModel.mockResolvedValueOnce({ model: "custom/guard-v1" });
+    mocks.resolveGuardModelRefCompatibility.mockReturnValue({
+      compatible: true,
+      api: "openai-completions",
+    });
+    mocks.prompterText
+      .mockResolvedValueOnce("Safe, Unsafe, Review")
+      .mockResolvedValueOnce("PII, Violence, None");
+    mocks.prompterMultiselect
+      .mockResolvedValueOnce(["Unsafe", "Review"])
+      .mockResolvedValueOnce(["PII"]);
+
+    const selectQueue = ["local", "block", "allow"];
+    mocks.clackSelect.mockImplementation(async () => selectQueue.shift());
+    mocks.clackIntro.mockResolvedValue(undefined);
+    mocks.clackOutro.mockResolvedValue(undefined);
+    mocks.clackConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+    await runConfigureWizard(
+      { command: "update", sections: ["guard-model"] },
+      {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn(),
+      },
+    );
+
+    expect(mocks.writeConfigFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agents: expect.objectContaining({
+          defaults: expect.objectContaining({
+            inputGuardModel: "custom/guard-v1",
+            models: {
+              "custom/guard-v1": {
+                guardTaxonomy: {
+                  labels: ["Safe", "Unsafe", "Review"],
+                  categories: ["PII", "Violence", "None"],
+                },
+              },
+            },
+            inputGuardPolicy: {
+              "custom/guard-v1": {
+                enabledLabels: ["Unsafe", "Review"],
+                enabledCategories: ["PII"],
+              },
+            },
+          }),
+        }),
       }),
     );
   });

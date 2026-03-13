@@ -16,8 +16,16 @@ import {
   resolveAgentModelFallbackValues,
   resolveAgentModelPrimaryValue,
 } from "../config/model-input.js";
+import type {
+  GuardPolicySelectionConfig,
+  GuardTaxonomyConfig,
+} from "../config/types.agent-defaults.js";
 import type { ModelApi } from "../config/types.models.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import {
+  resolveConfiguredGuardPolicySelection,
+  resolveConfiguredGuardTaxonomy,
+} from "./guard-model-registry.js";
 import { resolveApiKeyForProvider, type ResolvedProviderAuth } from "./model-auth.js";
 import { findNormalizedProviderValue, normalizeProviderId } from "./model-selection.js";
 import { resolveModel } from "./pi-embedded-runner/model.js";
@@ -29,10 +37,16 @@ const log = createSubsystemLogger("guard-model");
 export type GuardModelAction = "block" | "redact" | "warn";
 export type GuardModelOnError = "allow" | "block";
 
-export type GuardModelConfig = {
+export type GuardModelCandidateConfig = {
   provider: string;
   modelId: string;
-  fallbacks?: Array<{ provider: string; modelId: string }>;
+  modelRef: string;
+  taxonomy?: GuardTaxonomyConfig;
+  policy?: GuardPolicySelectionConfig;
+};
+
+export type GuardModelConfig = GuardModelCandidateConfig & {
+  fallbacks?: GuardModelCandidateConfig[];
   action: GuardModelAction;
   onError: GuardModelOnError;
   maxInputChars?: number;
@@ -41,6 +55,7 @@ export type GuardModelConfig = {
 
 export type GuardResult = {
   safe: boolean;
+  label?: string;
   reason?: string;
   categories?: string[];
   source?: "classification" | "error";
@@ -92,6 +107,7 @@ export type GuardModelCompatibility = {
 };
 
 type GuardEndpointKind = "chat-completions" | "responses";
+type GuardPolicyScope = "input" | "output";
 
 function resolveGuardModelCompatibility(params: {
   provider: string;
@@ -224,6 +240,24 @@ function extractGuardReplyText(json: unknown, endpointKind: GuardEndpointKind): 
 
 // ─── Config resolution ──────────────────────────────────────────────────────
 
+function buildGuardCandidateConfig(params: {
+  provider: string;
+  modelId: string;
+  modelRef: string;
+  cfg: OpenClawConfig;
+  scope: GuardPolicyScope;
+}): GuardModelCandidateConfig {
+  const taxonomy = resolveConfiguredGuardTaxonomy(params.cfg, params.modelRef);
+  const policy = resolveConfiguredGuardPolicySelection(params.cfg, params.scope, params.modelRef);
+  return {
+    provider: params.provider,
+    modelId: params.modelId,
+    modelRef: params.modelRef,
+    ...(taxonomy ? { taxonomy } : {}),
+    ...(policy ? { policy } : {}),
+  };
+}
+
 function resolveGuardModelConfigFromKeys(
   cfg: OpenClawConfig,
   // AgentModelConfig — string or { primary, fallbacks }
@@ -231,6 +265,7 @@ function resolveGuardModelConfigFromKeys(
   actionValue: string | undefined,
   onErrorValue: string | undefined,
   maxInputCharsValue: unknown,
+  scope: GuardPolicyScope,
 ): GuardModelConfig | null {
   const primary = resolveAgentModelPrimaryValue(
     guardModelCfg as Parameters<typeof resolveAgentModelPrimaryValue>[0],
@@ -248,14 +283,20 @@ function resolveGuardModelConfigFromKeys(
 
   const provider = primary.slice(0, slashIdx);
   const modelId = primary.slice(slashIdx + 1);
+  const primaryCandidate = buildGuardCandidateConfig({
+    provider,
+    modelId,
+    modelRef: primary,
+    cfg,
+    scope,
+  });
   const maxInputChars = resolveGuardMaxInputChars(maxInputCharsValue);
   const primaryCompatibility = resolveGuardModelCompatibility({ provider, modelId, cfg });
   if (!primaryCompatibility.compatible) {
     const compatibilityError = `Guard model "${primary}" is not compatible: ${primaryCompatibility.reason ?? "unsupported API"}`;
     log.warn(compatibilityError);
     return {
-      provider,
-      modelId,
+      ...primaryCandidate,
       action: (actionValue as GuardModelAction | undefined) ?? "block",
       onError: "block",
       ...(maxInputChars !== undefined ? { maxInputChars } : {}),
@@ -267,7 +308,7 @@ function resolveGuardModelConfigFromKeys(
     guardModelCfg as Parameters<typeof resolveAgentModelFallbackValues>[0],
   );
   const seen = new Set<string>([`${provider}/${modelId}`]);
-  const fallbacks: Array<{ provider: string; modelId: string }> = [];
+  const fallbacks: GuardModelCandidateConfig[] = [];
   for (const fallbackRaw of fallbackRefs) {
     const parsed = parseGuardModelRef(fallbackRaw);
     if (!parsed) {
@@ -289,12 +330,19 @@ function resolveGuardModelConfigFromKeys(
       continue;
     }
     seen.add(key);
-    fallbacks.push(parsed);
+    fallbacks.push(
+      buildGuardCandidateConfig({
+        provider: parsed.provider,
+        modelId: parsed.modelId,
+        modelRef: fallbackRaw,
+        cfg,
+        scope,
+      }),
+    );
   }
 
   return {
-    provider,
-    modelId,
+    ...primaryCandidate,
     ...(fallbacks.length > 0 ? { fallbacks } : {}),
     action: (actionValue as GuardModelAction | undefined) ?? "block",
     onError: (onErrorValue as GuardModelOnError | undefined) ?? "allow",
@@ -334,6 +382,7 @@ export function resolveOutputGuardModelConfig(
     actionValue,
     onErrorValue,
     maxInputCharsValue,
+    "output",
   );
 }
 
@@ -359,6 +408,7 @@ export function resolveInputGuardModelConfig(
     cfg.agents?.defaults?.inputGuardModelAction,
     cfg.agents?.defaults?.inputGuardModelOnError,
     cfg.agents?.defaults?.inputGuardModelMaxInputChars,
+    "input",
   );
 }
 
@@ -399,6 +449,77 @@ function truncateGuardInput(
     content: `${content.slice(0, maxChars - GUARD_TRUNCATION_MARKER.length)}${GUARD_TRUNCATION_MARKER}`,
     truncated: true,
   };
+}
+
+function formatGuardList(values: string[] | undefined, fallback = "(none)"): string {
+  return values && values.length > 0 ? values.join(", ") : fallback;
+}
+
+function buildGuardSystemPrompt(config: GuardModelCandidateConfig): string {
+  const supportedLabels = config.taxonomy?.labels ?? [];
+  const supportedCategories = config.taxonomy?.categories ?? [];
+  const enabledLabels = config.policy?.enabledLabels ?? supportedLabels;
+  const enabledCategories = config.policy?.enabledCategories ?? supportedCategories;
+
+  return [
+    "You are a content safety classifier.",
+    "Classify the provided content and return a single JSON object with keys: label, categories, reason, safe.",
+    "Only emit JSON. Do not wrap it in markdown.",
+    `Supported labels: ${formatGuardList(supportedLabels)}`,
+    `Supported categories: ${formatGuardList(supportedCategories)}`,
+    `Enabled labels for enforcement: ${formatGuardList(enabledLabels)}`,
+    `Enabled categories for enforcement: ${formatGuardList(enabledCategories)}`,
+  ].join("\n");
+}
+
+function buildGuardUserPrompt(content: string): string {
+  return `Classify this content:\n\n${content}`;
+}
+
+function isSafeEquivalentLabel(label: string): boolean {
+  return label.trim().toLowerCase() === "safe";
+}
+
+function isNoneEquivalentCategory(category: string): boolean {
+  return category.trim().toLowerCase() === "none";
+}
+
+function includesEnabledValue(values: string[] | undefined, candidate: string): boolean {
+  if (!values) {
+    return true;
+  }
+  const normalizedCandidate = candidate.trim().toLowerCase();
+  return values.some((value) => value.trim().toLowerCase() === normalizedCandidate);
+}
+
+function deriveGuardSafety(params: {
+  label?: string;
+  categories?: string[];
+  legacySafe?: boolean;
+  config: GuardModelCandidateConfig;
+}): boolean {
+  const label = params.label?.trim();
+  const categories = params.categories?.filter((category) => category.trim().length > 0) ?? [];
+
+  if (label || categories.length > 0) {
+    const labelTriggered =
+      label !== undefined
+        ? !isSafeEquivalentLabel(label) &&
+          includesEnabledValue(params.config.policy?.enabledLabels, label)
+        : false;
+    const categoryTriggered = categories.some(
+      (category) =>
+        !isNoneEquivalentCategory(category) &&
+        includesEnabledValue(params.config.policy?.enabledCategories, category),
+    );
+    return !(labelTriggered || categoryTriggered);
+  }
+
+  if (typeof params.legacySafe === "boolean") {
+    return params.legacySafe;
+  }
+
+  return true;
 }
 
 /**
@@ -455,11 +576,16 @@ export async function evaluateGuard(
     agentDir: params?.agentDir,
   });
   const url = resolveGuardEndpointUrl(baseUrl, endpointKind);
+  const systemPrompt = buildGuardSystemPrompt(config);
+  const userPrompt = buildGuardUserPrompt(guardInput.content);
   const body =
     endpointKind === "responses"
       ? JSON.stringify({
           model: config.modelId,
-          input: [{ role: "user", content: guardInput.content }],
+          input: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ],
           max_output_tokens: 200,
           temperature: 0,
           // Preserve Codex/OpenAI responses compatibility and avoid retention by default.
@@ -467,7 +593,10 @@ export async function evaluateGuard(
         })
       : JSON.stringify({
           model: config.modelId,
-          messages: [{ role: "user", content: guardInput.content }],
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ],
           max_tokens: 200,
           temperature: 0,
         });
@@ -538,18 +667,32 @@ function parseGuardResponse(raw: string, config: GuardModelConfig): GuardResult 
     try {
       const parsed = JSON.parse(jsonContent) as {
         safe?: unknown;
+        label?: unknown;
         reason?: unknown;
         categories?: unknown;
       };
-      if (typeof parsed.safe !== "boolean") {
+      const label =
+        typeof parsed.label === "string" && parsed.label.trim() ? parsed.label.trim() : undefined;
+      const categories = Array.isArray(parsed.categories)
+        ? parsed.categories.filter(
+            (category): category is string =>
+              typeof category === "string" && category.trim().length > 0,
+          )
+        : undefined;
+      const legacySafe = typeof parsed.safe === "boolean" ? parsed.safe : undefined;
+      if (!label && (!categories || categories.length === 0) && legacySafe === undefined) {
         continue;
       }
       return {
-        safe: parsed.safe,
+        safe: deriveGuardSafety({
+          label,
+          categories,
+          legacySafe,
+          config,
+        }),
+        label,
         reason: typeof parsed.reason === "string" ? parsed.reason : undefined,
-        categories: Array.isArray(parsed.categories)
-          ? parsed.categories.filter((category): category is string => typeof category === "string")
-          : undefined,
+        categories,
         source: "classification",
       };
     } catch {
@@ -557,8 +700,10 @@ function parseGuardResponse(raw: string, config: GuardModelConfig): GuardResult 
     }
   }
 
-  log.warn(`guard model returned no verdict object with boolean "safe": "${raw.slice(0, 200)}"`);
-  return handleGuardError(config, 'invalid "safe" field');
+  log.warn(
+    `guard model returned no verdict object with label/categories or boolean "safe": "${raw.slice(0, 200)}"`,
+  );
+  return handleGuardError(config, 'invalid "safe"/"label" fields');
 }
 
 // ─── Error handling ─────────────────────────────────────────────────────────
@@ -581,10 +726,10 @@ const GUARD_UNAVAILABLE_BLOCKED_MESSAGE =
 const GUARD_TRUNCATED_WARNING_PREFIX = "⚠️ Guard model input was truncated to ";
 const QUARANTINE_SEPARATOR = "───────────────────────────────────────";
 
-function buildBlockedPayload(reason?: string, originalContent?: string): ReplyPayload[] {
+function buildBlockedPayload(detail?: string, originalContent?: string): ReplyPayload[] {
   const lines = ["⚠️ BLOCKED: Safety guard flagged this response."];
-  if (reason) {
-    lines.push(`Reason: ${reason}`);
+  if (detail) {
+    lines.push(detail);
   }
   if (originalContent) {
     lines.push(
@@ -598,10 +743,10 @@ function buildBlockedPayload(reason?: string, originalContent?: string): ReplyPa
   return [{ text: lines.join("\n"), isError: true }];
 }
 
-function buildInputBlockedPayload(reason?: string, originalContent?: string): ReplyPayload[] {
+function buildInputBlockedPayload(detail?: string, originalContent?: string): ReplyPayload[] {
   const lines = ["⚠️ BLOCKED: Safety guard flagged this input."];
-  if (reason) {
-    lines.push(`Reason: ${reason}`);
+  if (detail) {
+    lines.push(detail);
   }
   if (originalContent) {
     lines.push(
@@ -626,6 +771,20 @@ function buildGuardErrorPayload(): ReplyPayload[] {
 
 function buildGuardTruncationWarningText(maxChars: number): string {
   return `${GUARD_TRUNCATED_WARNING_PREFIX}${maxChars} characters before safety screening.`;
+}
+
+function formatGuardDecision(result: Pick<GuardResult, "label" | "reason" | "categories">): string {
+  const parts: string[] = [];
+  if (result.label) {
+    parts.push(`Label: ${result.label}`);
+  }
+  if (result.reason) {
+    parts.push(`Reason: ${result.reason}`);
+  }
+  if (result.categories?.length) {
+    parts.push(`Categories: ${result.categories.join(", ")}`);
+  }
+  return parts.join("\n");
 }
 
 function annotateLastTextPayload(payloads: ReplyPayload[], suffix: string): ReplyPayload[] {
@@ -685,7 +844,7 @@ export async function applyGuardToPayloads(
   }
 
   log.info(
-    `guard model flagged content as unsafe: ${result.reason ?? "no reason"}` +
+    `guard model flagged content as unsafe: ${result.label ?? result.reason ?? "no reason"}` +
       (result.categories?.length ? ` [${result.categories.join(", ")}]` : ""),
   );
 
@@ -693,7 +852,7 @@ export async function applyGuardToPayloads(
     switch (config.action) {
       case "block":
         // Show flagged content in quarantine wrapper so users can review what was blocked
-        return buildBlockedPayload(result.reason, combinedText);
+        return buildBlockedPayload(formatGuardDecision(result), combinedText);
 
       case "redact":
         // Replace text content but keep media/error payloads
@@ -701,7 +860,9 @@ export async function applyGuardToPayloads(
           if (p.text && !p.isError && !p.isReasoning) {
             return {
               ...p,
-              text: REDACTED_MESSAGE + (result.reason ? `\nReason: ${result.reason}` : ""),
+              text:
+                REDACTED_MESSAGE +
+                (formatGuardDecision(result) ? `\n${formatGuardDecision(result)}` : ""),
             };
           }
           return p;
@@ -712,7 +873,7 @@ export async function applyGuardToPayloads(
         // the last deliverable payload (for example isolated cron delivery).
         // Annotate the last user-facing text payload instead of appending one.
         const warningText =
-          `⚠️ Content safety warning: ${result.reason ?? "potential safety concern"}` +
+          `⚠️ Content safety warning: ${result.label ?? result.reason ?? "potential safety concern"}` +
           (result.categories?.length ? ` [${result.categories.join(", ")}]` : "");
         const nextPayloads = payloads.slice();
         for (let i = nextPayloads.length - 1; i >= 0; i -= 1) {
@@ -765,7 +926,7 @@ export async function applyGuardToInput(
   }
 
   log.info(
-    `input guard model flagged content as unsafe: ${result.reason ?? "no reason"}` +
+    `input guard model flagged content as unsafe: ${result.label ?? result.reason ?? "no reason"}` +
       (result.categories?.length ? ` [${result.categories.join(", ")}]` : ""),
   );
 
@@ -774,7 +935,7 @@ export async function applyGuardToInput(
       return {
         blocked: true,
         result,
-        payloads: buildInputBlockedPayload(result.reason, text),
+        payloads: buildInputBlockedPayload(formatGuardDecision(result), text),
       };
 
     case "redact":
@@ -784,7 +945,7 @@ export async function applyGuardToInput(
         payloads: [
           {
             text:
-              `⚠️ Input safety redaction: ${result.reason ?? "sensitive content flagged"}` +
+              `⚠️ Input safety redaction: ${result.label ?? result.reason ?? "sensitive content flagged"}` +
               (result.categories?.length ? ` [${result.categories.join(", ")}]` : ""),
             isError: true,
           },
@@ -798,7 +959,7 @@ export async function applyGuardToInput(
         payloads: [
           {
             text:
-              `⚠️ Input safety warning: ${result.reason ?? "potential safety concern"}` +
+              `⚠️ Input safety warning: ${result.label ?? result.reason ?? "potential safety concern"}` +
               (result.categories?.length ? ` [${result.categories.join(", ")}]` : ""),
             isError: true,
           },
@@ -809,7 +970,7 @@ export async function applyGuardToInput(
       return {
         blocked: true,
         result,
-        payloads: buildInputBlockedPayload(result.reason, text),
+        payloads: buildInputBlockedPayload(formatGuardDecision(result), text),
       };
   }
 }
@@ -913,7 +1074,13 @@ async function evaluateGuardWithFallbacks(
   },
 ): Promise<GuardResult> {
   const candidates = [
-    { provider: config.provider, modelId: config.modelId },
+    {
+      provider: config.provider,
+      modelId: config.modelId,
+      modelRef: config.modelRef,
+      taxonomy: config.taxonomy,
+      policy: config.policy,
+    },
     ...(config.fallbacks ?? []),
   ];
   let lastError: GuardResult | null = null;

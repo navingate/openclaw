@@ -1,5 +1,12 @@
 import fsPromises from "node:fs/promises";
 import nodePath from "node:path";
+import {
+  resolveConfiguredGuardPolicySelection,
+  resolveConfiguredGuardTaxonomy,
+  resolveKnownGuardTaxonomy,
+  upsertGuardPolicySelection,
+  upsertGuardTaxonomy,
+} from "../agents/guard-model-registry.js";
 import { resolveGuardModelRefCompatibility } from "../agents/guard-model.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import type { OpenClawConfig } from "../config/config.js";
@@ -75,6 +82,157 @@ function isProviderModelRef(value: string | undefined): value is string {
   const trimmed = value.trim();
   const slashIdx = trimmed.indexOf("/");
   return slashIdx > 0 && slashIdx < trimmed.length - 1;
+}
+
+function parseGuardTermsCsv(value: string): string[] {
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const part of value.split(",")) {
+    const trimmed = part.trim();
+    if (!trimmed) {
+      continue;
+    }
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    terms.push(trimmed);
+  }
+  return terms;
+}
+
+function requireGuardTermsCsv(label: string) {
+  return (value: string) =>
+    parseGuardTermsCsv(value).length > 0 ? undefined : `Enter at least one ${label}`;
+}
+
+async function ensureGuardModelTaxonomy(params: {
+  cfg: OpenClawConfig;
+  prompter: WizardPrompter;
+  modelRef: string;
+}): Promise<{ cfg: OpenClawConfig; taxonomy: { labels: string[]; categories: string[] } }> {
+  const existing = resolveConfiguredGuardTaxonomy(params.cfg, params.modelRef);
+  if (existing) {
+    return {
+      cfg: upsertGuardTaxonomy({
+        cfg: params.cfg,
+        modelRef: params.modelRef,
+        taxonomy: existing,
+      }),
+      taxonomy: existing,
+    };
+  }
+
+  const known = resolveKnownGuardTaxonomy(params.modelRef);
+  if (known) {
+    return {
+      cfg: upsertGuardTaxonomy({
+        cfg: params.cfg,
+        modelRef: params.modelRef,
+        taxonomy: known,
+      }),
+      taxonomy: known,
+    };
+  }
+
+  const labelsRaw = await params.prompter.text({
+    message: `Guard labels for ${params.modelRef} (comma-separated)`,
+    placeholder: "Safe, Unsafe, Controversial",
+    validate: requireGuardTermsCsv("labels"),
+  });
+  const categoriesRaw = await params.prompter.text({
+    message: `Guard categories for ${params.modelRef} (comma-separated)`,
+    placeholder: "Violent, PII, Suicide & Self-Harm, None",
+    validate: requireGuardTermsCsv("categories"),
+  });
+  const taxonomy = {
+    labels: parseGuardTermsCsv(labelsRaw),
+    categories: parseGuardTermsCsv(categoriesRaw),
+  };
+  return {
+    cfg: upsertGuardTaxonomy({
+      cfg: params.cfg,
+      modelRef: params.modelRef,
+      taxonomy,
+    }),
+    taxonomy,
+  };
+}
+
+async function promptGuardPolicySelection(params: {
+  cfg: OpenClawConfig;
+  prompter: WizardPrompter;
+  scope: "input" | "output";
+  modelRef: string;
+  taxonomy: { labels: string[]; categories: string[] };
+}): Promise<OpenClawConfig> {
+  const existing = resolveConfiguredGuardPolicySelection(params.cfg, params.scope, params.modelRef);
+  const enabledLabels =
+    params.taxonomy.labels.length === 0
+      ? []
+      : await params.prompter.multiselect({
+          message: `Enabled ${params.scope} guard labels for ${params.modelRef}`,
+          options: params.taxonomy.labels.map((label) => ({
+            value: label,
+            label,
+          })),
+          initialValues: existing?.enabledLabels ?? params.taxonomy.labels,
+          searchable: params.taxonomy.labels.length > 8,
+        });
+  const enabledCategories =
+    params.taxonomy.categories.length === 0
+      ? []
+      : await params.prompter.multiselect({
+          message: `Enabled ${params.scope} guard categories for ${params.modelRef}`,
+          options: params.taxonomy.categories.map((category) => ({
+            value: category,
+            label: category,
+          })),
+          initialValues: existing?.enabledCategories ?? params.taxonomy.categories,
+          searchable: params.taxonomy.categories.length > 8,
+        });
+
+  return upsertGuardPolicySelection({
+    cfg: params.cfg,
+    scope: params.scope,
+    modelRef: params.modelRef,
+    selection: {
+      enabledLabels,
+      enabledCategories,
+    },
+  });
+}
+
+async function ensureFallbackGuardPolicies(params: {
+  cfg: OpenClawConfig;
+  scope: "input" | "output";
+  fallbackRefs: string[];
+  prompter: WizardPrompter;
+}): Promise<OpenClawConfig> {
+  let nextConfig = params.cfg;
+  for (const modelRef of params.fallbackRefs) {
+    const ensured = await ensureGuardModelTaxonomy({
+      cfg: nextConfig,
+      prompter: params.prompter,
+      modelRef,
+    });
+    nextConfig = ensured.cfg;
+    const existing = resolveConfiguredGuardPolicySelection(nextConfig, params.scope, modelRef);
+    if (existing) {
+      continue;
+    }
+    nextConfig = upsertGuardPolicySelection({
+      cfg: nextConfig,
+      scope: params.scope,
+      modelRef,
+      selection: {
+        enabledLabels: ensured.taxonomy.labels,
+        enabledCategories: ensured.taxonomy.categories,
+      },
+    });
+  }
+  return nextConfig;
 }
 
 async function runGatewayHealthCheck(params: {
@@ -377,6 +535,7 @@ async function promptInputGuardModelConfig(
           defaults: {
             ...nextConfig.agents?.defaults,
             inputGuardModel: undefined,
+            inputGuardPolicy: undefined,
             inputGuardModelAction: undefined,
             inputGuardModelOnError: undefined,
             inputGuardModelMaxInputChars: undefined,
@@ -439,6 +598,27 @@ async function promptInputGuardModelConfig(
     runtime,
   );
 
+  const fallbackRefs = existingFallbacks ?? [];
+  const ensuredPrimary = await ensureGuardModelTaxonomy({
+    cfg: nextConfig,
+    prompter,
+    modelRef: selectedModel,
+  });
+  nextConfig = ensuredPrimary.cfg;
+  nextConfig = await promptGuardPolicySelection({
+    cfg: nextConfig,
+    prompter,
+    scope: "input",
+    modelRef: selectedModel,
+    taxonomy: ensuredPrimary.taxonomy,
+  });
+  nextConfig = await ensureFallbackGuardPolicies({
+    cfg: nextConfig,
+    scope: "input",
+    fallbackRefs,
+    prompter,
+  });
+
   return {
     ...nextConfig,
     agents: {
@@ -497,8 +677,15 @@ async function promptOutputGuardModelConfig(
           defaults: {
             ...nextConfig.agents?.defaults,
             outputGuardModel: undefined,
+            outputGuardPolicy: undefined,
             outputGuardModelAction: undefined,
             outputGuardModelOnError: undefined,
+            outputGuardModelMaxInputChars: undefined,
+            // Clear legacy fields to prevent resolveOutputGuardModelConfig fallback from keeping it enabled
+            guardModel: undefined,
+            guardModelAction: undefined,
+            guardModelOnError: undefined,
+            guardModelMaxInputChars: undefined,
           },
         },
       };
@@ -563,6 +750,27 @@ async function promptOutputGuardModelConfig(
     }),
     runtime,
   );
+
+  const fallbackRefs = existingFallbacks ?? [];
+  const ensuredPrimary = await ensureGuardModelTaxonomy({
+    cfg: nextConfig,
+    prompter,
+    modelRef: selectedModel,
+  });
+  nextConfig = ensuredPrimary.cfg;
+  nextConfig = await promptGuardPolicySelection({
+    cfg: nextConfig,
+    prompter,
+    scope: "output",
+    modelRef: selectedModel,
+    taxonomy: ensuredPrimary.taxonomy,
+  });
+  nextConfig = await ensureFallbackGuardPolicies({
+    cfg: nextConfig,
+    scope: "output",
+    fallbackRefs,
+    prompter,
+  });
 
   return {
     ...nextConfig,

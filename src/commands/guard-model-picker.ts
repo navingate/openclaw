@@ -1,44 +1,8 @@
+import { GUARD_MODEL_CATALOG } from "../agents/guard-model-registry.js";
 import type { WizardPrompter } from "../wizard/prompts.js";
 
 const KEEP_VALUE = "__keep__";
 const MANUAL_VALUE = "__manual__";
-
-type GuardModelEntry = {
-  value: string;
-  label: string;
-  hint: string;
-};
-
-// Curated list of known OpenAI-compatible safety/guard classification models.
-// These are purpose-built classifiers that respond with SAFE/UNSAFE verdicts.
-// Must be accessible via an OpenAI chat-completions or responses API endpoint.
-export const GUARD_MODEL_CATALOG: GuardModelEntry[] = [
-  {
-    value: "chutes/Qwen/Qwen3Guard",
-    label: "chutes/Qwen/Qwen3Guard",
-    hint: "Qwen3Guard · Alibaba/Qwen · purpose-built safety classifier",
-  },
-  {
-    value: "groq/meta-llama/llama-guard-3-8b",
-    label: "groq/meta-llama/llama-guard-3-8b",
-    hint: "Llama Guard 3 8B · Meta · fast inference via Groq",
-  },
-  {
-    value: "together/meta-llama/Llama-Guard-3-8B",
-    label: "together/meta-llama/Llama-Guard-3-8B",
-    hint: "Llama Guard 3 8B · Meta · via Together AI",
-  },
-  {
-    value: "together/meta-llama/Meta-Llama-Guard-2-8B",
-    label: "together/meta-llama/Meta-Llama-Guard-2-8B",
-    hint: "Llama Guard 2 8B · Meta · via Together AI",
-  },
-  {
-    value: "openrouter/meta-llama/llama-guard-3-8b",
-    label: "openrouter/meta-llama/llama-guard-3-8b",
-    hint: "Llama Guard 3 8B · Meta · via OpenRouter",
-  },
-];
 
 type PromptGuardModelParams = {
   prompter: WizardPrompter;
