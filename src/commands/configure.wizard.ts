@@ -1,5 +1,11 @@
 import fsPromises from "node:fs/promises";
 import nodePath from "node:path";
+import { resolveOpenClawAgentDir } from "../agents/agent-paths.js";
+import {
+  ensureAuthProfileStore,
+  listProfilesForProvider,
+  upsertAuthProfile,
+} from "../agents/auth-profiles.js";
 import {
   resolveConfiguredGuardPolicySelection,
   resolveConfiguredGuardTaxonomy,
@@ -8,11 +14,15 @@ import {
   upsertGuardTaxonomy,
 } from "../agents/guard-model-registry.js";
 import { resolveGuardModelRefCompatibility } from "../agents/guard-model.js";
+import { hasUsableCustomProviderApiKey, resolveEnvApiKey } from "../agents/model-auth.js";
+import { normalizeProviderId } from "../agents/model-selection.js";
+import { resolveDefaultAgentWorkspaceDir } from "../agents/workspace.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { readConfigFileSnapshot, resolveGatewayPort, writeConfigFile } from "../config/config.js";
 import { logConfigUpdated } from "../config/logging.js";
 import { ensureControlUiAssetsBuilt } from "../infra/control-ui-assets.js";
+import { resolvePluginProviders } from "../plugins/providers.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { defaultRuntime } from "../runtime.js";
 import { note } from "../terminal/note.js";
@@ -21,6 +31,8 @@ import { createClackPrompter } from "../wizard/clack-prompter.js";
 import { resolveOnboardingSecretInputString } from "../wizard/onboarding.secret-input.js";
 import type { WizardPrompter } from "../wizard/prompts.js";
 import { WizardCancelledError } from "../wizard/prompts.js";
+import { runProviderPluginAuthMethod } from "./auth-choice.apply.plugin-provider.js";
+import { applyAuthChoice } from "./auth-choice.js";
 import { removeChannelConfigWizard } from "./configure.channels.js";
 import { maybeInstallDaemon } from "./configure.daemon.js";
 import { promptAuthConfig } from "./configure.gateway-auth.js";
@@ -41,6 +53,7 @@ import {
 import { promptGuardModel } from "./guard-model-picker.js";
 import { formatHealthCheckFailure } from "./health-format.js";
 import { healthCommand } from "./health.js";
+import { applyAuthProfileConfig } from "./onboard-auth.js";
 import { noteChannelStatus, setupChannels } from "./onboard-channels.js";
 import {
   applyWizardMetadata,
@@ -55,6 +68,8 @@ import {
 } from "./onboard-helpers.js";
 import { promptRemoteGatewayConfig } from "./onboard-remote.js";
 import { setupSkills } from "./onboard-skills.js";
+import type { AuthChoice } from "./onboard-types.js";
+import { pickAuthMethod, resolveProviderMatch } from "./provider-auth-helpers.js";
 
 type ConfigureSectionChoice = WizardSection | "__continue";
 
@@ -105,6 +120,181 @@ function parseGuardTermsCsv(value: string): string[] {
 function requireGuardTermsCsv(label: string) {
   return (value: string) =>
     parseGuardTermsCsv(value).length > 0 ? undefined : `Enter at least one ${label}`;
+}
+
+const GUARD_PROVIDER_AUTH_CHOICES: Partial<Record<string, AuthChoice>> = {
+  byteplus: "byteplus-api-key",
+  chutes: "chutes",
+  "cloudflare-ai-gateway": "cloudflare-ai-gateway-api-key",
+  google: "gemini-api-key",
+  "github-copilot": "github-copilot",
+  huggingface: "huggingface-api-key",
+  kilocode: "kilocode-api-key",
+  litellm: "litellm-api-key",
+  mistral: "mistral-api-key",
+  minimax: "minimax-global-api",
+  modelstudio: "modelstudio-api-key",
+  moonshot: "moonshot-api-key",
+  openai: "openai-api-key",
+  opencode: "opencode-zen",
+  "opencode-go": "opencode-go",
+  openrouter: "openrouter-api-key",
+  qianfan: "qianfan-api-key",
+  "qwen-portal": "qwen-portal",
+  synthetic: "synthetic-api-key",
+  together: "together-api-key",
+  "vercel-ai-gateway": "ai-gateway-api-key",
+  venice: "venice-api-key",
+  volcengine: "volcengine-api-key",
+  xai: "xai-api-key",
+  xiaomi: "xiaomi-api-key",
+  zai: "zai-api-key",
+};
+
+function hasGuardProviderAuth(cfg: OpenClawConfig, provider: string): boolean {
+  const store = ensureAuthProfileStore(resolveOpenClawAgentDir(), {
+    allowKeychainPrompt: false,
+  });
+  if (listProfilesForProvider(store, provider).length > 0) {
+    return true;
+  }
+  if (resolveEnvApiKey(provider)) {
+    return true;
+  }
+  if (hasUsableCustomProviderApiKey(cfg, provider)) {
+    return true;
+  }
+  return false;
+}
+
+function resolveGuardWorkspaceDir(cfg: OpenClawConfig): string {
+  return cfg.agents?.defaults?.workspace ?? resolveDefaultAgentWorkspaceDir();
+}
+
+async function promptGenericGuardProviderApiKey(params: {
+  cfg: OpenClawConfig;
+  provider: string;
+  runtime: RuntimeEnv;
+}): Promise<OpenClawConfig> {
+  const normalizedProvider = normalizeProviderId(params.provider);
+  const tokenInput = guardCancel(
+    await text({
+      message: `${normalizedProvider} API key/token`,
+      validate: (value) => (String(value ?? "").trim() ? undefined : "Required"),
+    }),
+    params.runtime,
+  );
+  const token = String(tokenInput ?? "").trim();
+  const profileId = `${normalizedProvider}:default`;
+
+  upsertAuthProfile({
+    profileId,
+    credential: {
+      type: "api_key",
+      provider: normalizedProvider,
+      key: token,
+    },
+    agentDir: resolveOpenClawAgentDir(),
+  });
+
+  return applyAuthProfileConfig(params.cfg, {
+    profileId,
+    provider: normalizedProvider,
+    mode: "api_key",
+  });
+}
+
+async function ensureGuardProviderAuth(params: {
+  cfg: OpenClawConfig;
+  provider: string;
+  runtime: RuntimeEnv;
+  prompter: WizardPrompter;
+}): Promise<OpenClawConfig> {
+  const normalizedProvider = normalizeProviderId(params.provider);
+  if (hasGuardProviderAuth(params.cfg, normalizedProvider)) {
+    return params.cfg;
+  }
+
+  note(
+    [
+      `No auth is configured for guard provider "${normalizedProvider}".`,
+      "The guard model will not work until this provider has credentials.",
+    ].join("\n"),
+    "Guard Model Auth",
+  );
+
+  const configureNow = guardCancel(
+    await confirm({
+      message: `Configure ${normalizedProvider} auth now?`,
+      initialValue: true,
+    }),
+    params.runtime,
+  );
+  if (!configureNow) {
+    return params.cfg;
+  }
+
+  let nextConfig = params.cfg;
+  const authChoice = GUARD_PROVIDER_AUTH_CHOICES[normalizedProvider];
+  if (authChoice) {
+    const applied = await applyAuthChoice({
+      authChoice,
+      config: nextConfig,
+      prompter: params.prompter,
+      runtime: params.runtime,
+      setDefaultModel: false,
+    });
+    nextConfig = applied.config;
+  } else {
+    const providers = resolvePluginProviders({
+      config: nextConfig,
+      workspaceDir: resolveGuardWorkspaceDir(nextConfig),
+    });
+    const pluginProvider = resolveProviderMatch(providers, normalizedProvider);
+    if (pluginProvider?.auth.length) {
+      const methodId =
+        pluginProvider.auth.length === 1
+          ? pluginProvider.auth[0]?.id
+          : String(
+              await select({
+                message: `Auth method for ${pluginProvider.label}`,
+                options: pluginProvider.auth.map((entry) => ({
+                  value: entry.id,
+                  label: entry.label,
+                  hint: entry.hint,
+                })),
+                initialValue: pluginProvider.auth[0]?.id,
+              }),
+            );
+      const method = pickAuthMethod(pluginProvider, methodId) ?? pluginProvider.auth[0];
+      const applied = await runProviderPluginAuthMethod({
+        config: nextConfig,
+        runtime: params.runtime,
+        prompter: params.prompter,
+        method,
+        workspaceDir: resolveGuardWorkspaceDir(nextConfig),
+      });
+      nextConfig = applied.config;
+    } else {
+      nextConfig = await promptGenericGuardProviderApiKey({
+        cfg: nextConfig,
+        provider: normalizedProvider,
+        runtime: params.runtime,
+      });
+    }
+  }
+
+  if (!hasGuardProviderAuth(nextConfig, normalizedProvider)) {
+    note(
+      [
+        `Credentials for "${normalizedProvider}" are still missing.`,
+        `You can add them later with \`${formatCliCommand(`openclaw models auth login --provider ${normalizedProvider}`)}\` or by setting the provider API key in the environment/config.`,
+      ].join("\n"),
+      "Guard Model Auth",
+    );
+  }
+
+  return nextConfig;
 }
 
 async function ensureGuardModelTaxonomy(params: {
@@ -583,6 +773,12 @@ async function promptInputGuardModelConfig(
     );
     return nextConfig;
   }
+  nextConfig = await ensureGuardProviderAuth({
+    cfg: nextConfig,
+    provider: selectedModel.slice(0, selectedModel.indexOf("/")),
+    runtime,
+    prompter,
+  });
 
   const action = guardCancel(
     await select({
@@ -730,6 +926,12 @@ async function promptOutputGuardModelConfig(
     );
     return nextConfig;
   }
+  nextConfig = await ensureGuardProviderAuth({
+    cfg: nextConfig,
+    provider: selectedModel.slice(0, selectedModel.indexOf("/")),
+    runtime,
+    prompter,
+  });
 
   const action = guardCancel(
     await select({

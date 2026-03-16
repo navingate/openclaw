@@ -22,6 +22,14 @@ const mocks = vi.hoisted(() => ({
   summarizeExistingConfig: vi.fn(),
   promptGuardModel: vi.fn(),
   resolveGuardModelRefCompatibility: vi.fn(),
+  ensureAuthProfileStore: vi.fn(),
+  listProfilesForProvider: vi.fn(),
+  upsertAuthProfile: vi.fn(),
+  resolveEnvApiKey: vi.fn(),
+  hasUsableCustomProviderApiKey: vi.fn(),
+  applyAuthChoice: vi.fn(),
+  resolvePluginProviders: vi.fn(),
+  runProviderPluginAuthMethod: vi.fn(),
 }));
 
 vi.mock("@clack/prompts", () => ({
@@ -107,6 +115,29 @@ vi.mock("../agents/guard-model.js", () => ({
   resolveGuardModelRefCompatibility: mocks.resolveGuardModelRefCompatibility,
 }));
 
+vi.mock("../agents/auth-profiles.js", () => ({
+  ensureAuthProfileStore: mocks.ensureAuthProfileStore,
+  listProfilesForProvider: mocks.listProfilesForProvider,
+  upsertAuthProfile: mocks.upsertAuthProfile,
+}));
+
+vi.mock("../agents/model-auth.js", () => ({
+  resolveEnvApiKey: mocks.resolveEnvApiKey,
+  hasUsableCustomProviderApiKey: mocks.hasUsableCustomProviderApiKey,
+}));
+
+vi.mock("./auth-choice.js", () => ({
+  applyAuthChoice: mocks.applyAuthChoice,
+}));
+
+vi.mock("../plugins/providers.js", () => ({
+  resolvePluginProviders: mocks.resolvePluginProviders,
+}));
+
+vi.mock("./auth-choice.apply.plugin-provider.js", () => ({
+  runProviderPluginAuthMethod: mocks.runProviderPluginAuthMethod,
+}));
+
 import { WizardCancelledError } from "../wizard/prompts.js";
 import { runConfigureWizard } from "./configure.wizard.js";
 
@@ -117,6 +148,13 @@ describe("runConfigureWizard", () => {
       text: mocks.prompterText,
       multiselect: mocks.prompterMultiselect,
     });
+    mocks.ensureAuthProfileStore.mockReturnValue({});
+    mocks.listProfilesForProvider.mockReturnValue(["configured"]);
+    mocks.resolveEnvApiKey.mockReturnValue(null);
+    mocks.hasUsableCustomProviderApiKey.mockReturnValue(false);
+    mocks.applyAuthChoice.mockImplementation(async ({ config }) => ({ config }));
+    mocks.resolvePluginProviders.mockReturnValue([]);
+    mocks.runProviderPluginAuthMethod.mockImplementation(async ({ config }) => ({ config }));
   });
 
   it("preserves guard model fallbacks when updating guard settings", async () => {
@@ -277,6 +315,155 @@ describe("runConfigureWizard", () => {
                 enabledLabels: ["Controversial"],
                 enabledCategories: ["Politically Sensitive Topics"],
               },
+            },
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("prompts to configure missing guard provider auth using the mapped auth flow", async () => {
+    mocks.readConfigFileSnapshot.mockResolvedValue({
+      exists: true,
+      valid: true,
+      config: {
+        agents: {
+          defaults: {},
+        },
+      },
+      issues: [],
+    });
+    mocks.resolveGatewayPort.mockReturnValue(18789);
+    mocks.probeGatewayReachable.mockResolvedValue({ ok: false });
+    mocks.ensureControlUiAssetsBuilt.mockResolvedValue({ ok: true });
+    mocks.resolveControlUiLinks.mockReturnValue({ wsUrl: "ws://127.0.0.1:18789" });
+    mocks.summarizeExistingConfig.mockReturnValue("");
+    mocks.listProfilesForProvider.mockReturnValue([]);
+    mocks.promptGuardModel.mockResolvedValueOnce({
+      model: "openrouter/meta-llama/llama-guard-3-8b",
+    });
+    mocks.resolveGuardModelRefCompatibility.mockReturnValue({
+      compatible: true,
+      api: "openai-completions",
+    });
+    mocks.applyAuthChoice.mockImplementation(async ({ config }) => ({
+      config: {
+        ...config,
+        auth: {
+          ...config.auth,
+          profiles: {
+            ...config.auth?.profiles,
+            "openrouter:default": {
+              provider: "openrouter",
+              mode: "api_key",
+            },
+          },
+        },
+      },
+    }));
+    mocks.prompterMultiselect
+      .mockResolvedValueOnce(["safe", "unsafe"])
+      .mockResolvedValueOnce(["S1: Violent Crimes"]);
+
+    const selectQueue = ["local", "block", "allow"];
+    mocks.clackSelect.mockImplementation(async () => selectQueue.shift());
+    mocks.clackIntro.mockResolvedValue(undefined);
+    mocks.clackOutro.mockResolvedValue(undefined);
+    mocks.clackConfirm
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+
+    await runConfigureWizard(
+      { command: "update", sections: ["guard-model"] },
+      {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn(),
+      },
+    );
+
+    expect(mocks.applyAuthChoice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authChoice: "openrouter-api-key",
+        setDefaultModel: false,
+      }),
+    );
+    expect(mocks.writeConfigFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agents: expect.objectContaining({
+          defaults: expect.objectContaining({
+            inputGuardModel: "openrouter/meta-llama/llama-guard-3-8b",
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("falls back to prompting for a provider API key/token when no auth flow exists", async () => {
+    mocks.readConfigFileSnapshot.mockResolvedValue({
+      exists: true,
+      valid: true,
+      config: {
+        agents: {
+          defaults: {},
+        },
+      },
+      issues: [],
+    });
+    mocks.resolveGatewayPort.mockReturnValue(18789);
+    mocks.probeGatewayReachable.mockResolvedValue({ ok: false });
+    mocks.ensureControlUiAssetsBuilt.mockResolvedValue({ ok: true });
+    mocks.resolveControlUiLinks.mockReturnValue({ wsUrl: "ws://127.0.0.1:18789" });
+    mocks.summarizeExistingConfig.mockReturnValue("");
+    mocks.listProfilesForProvider.mockReturnValue([]);
+    mocks.promptGuardModel.mockResolvedValueOnce({
+      model: "groq/meta-llama/llama-guard-3-8b",
+    });
+    mocks.resolveGuardModelRefCompatibility.mockReturnValue({
+      compatible: true,
+      api: "openai-completions",
+    });
+    mocks.prompterMultiselect
+      .mockResolvedValueOnce(["safe"])
+      .mockResolvedValueOnce(["S1: Violent Crimes"]);
+
+    const selectQueue = ["local", "block", "allow"];
+    mocks.clackSelect.mockImplementation(async () => selectQueue.shift());
+    mocks.clackText.mockResolvedValueOnce("groq-test-key");
+    mocks.clackIntro.mockResolvedValue(undefined);
+    mocks.clackOutro.mockResolvedValue(undefined);
+    mocks.clackConfirm
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+
+    await runConfigureWizard(
+      { command: "update", sections: ["guard-model"] },
+      {
+        log: vi.fn(),
+        error: vi.fn(),
+        exit: vi.fn(),
+      },
+    );
+
+    expect(mocks.upsertAuthProfile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileId: "groq:default",
+        credential: expect.objectContaining({
+          type: "api_key",
+          provider: "groq",
+          key: "groq-test-key",
+        }),
+      }),
+    );
+    expect(mocks.writeConfigFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        auth: expect.objectContaining({
+          profiles: expect.objectContaining({
+            "groq:default": {
+              provider: "groq",
+              mode: "api_key",
             },
           }),
         }),
