@@ -6,38 +6,11 @@ import {
   text as clackText,
 } from "@clack/prompts";
 import { stylePromptHint, stylePromptMessage, stylePromptTitle } from "../terminal/prompt-style.js";
-
-export const CONFIGURE_WIZARD_SECTIONS = [
-  "workspace",
-  "model",
-  "guard-model",
-  "web",
-  "gateway",
-  "daemon",
-  "channels",
-  "skills",
-  "health",
-] as const;
-
-export type WizardSection = (typeof CONFIGURE_WIZARD_SECTIONS)[number];
-
-export function parseConfigureWizardSections(raw: unknown): {
-  sections: WizardSection[];
-  invalid: string[];
-} {
-  const sectionsRaw: string[] = Array.isArray(raw)
-    ? raw.map((value: unknown) => (typeof value === "string" ? value.trim() : "")).filter(Boolean)
-    : [];
-  if (sectionsRaw.length === 0) {
-    return { sections: [], invalid: [] };
-  }
-
-  const invalid = sectionsRaw.filter((s) => !CONFIGURE_WIZARD_SECTIONS.includes(s as never));
-  const sections = sectionsRaw.filter((s): s is WizardSection =>
-    CONFIGURE_WIZARD_SECTIONS.includes(s as never),
-  );
-  return { sections, invalid };
-}
+export {
+  CONFIGURE_WIZARD_SECTIONS,
+  parseConfigureWizardSections,
+  type WizardSection,
+} from "./configure.sections.js";
 
 export type ChannelsWizardMode = "configure" | "remove";
 

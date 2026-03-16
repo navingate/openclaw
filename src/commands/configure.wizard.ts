@@ -2,11 +2,6 @@ import fsPromises from "node:fs/promises";
 import nodePath from "node:path";
 import { resolveOpenClawAgentDir } from "../agents/agent-paths.js";
 import {
-  ensureAuthProfileStore,
-  listProfilesForProvider,
-  upsertAuthProfile,
-} from "../agents/auth-profiles.js";
-import {
   resolveConfiguredGuardPolicySelection,
   resolveConfiguredGuardTaxonomy,
   resolveKnownGuardTaxonomy,
@@ -14,15 +9,12 @@ import {
   upsertGuardTaxonomy,
 } from "../agents/guard-model-registry.js";
 import { resolveGuardModelRefCompatibility } from "../agents/guard-model.js";
-import { hasUsableCustomProviderApiKey, resolveEnvApiKey } from "../agents/model-auth.js";
 import { normalizeProviderId } from "../agents/model-selection.js";
-import { resolveDefaultAgentWorkspaceDir } from "../agents/workspace.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { readConfigFileSnapshot, resolveGatewayPort, writeConfigFile } from "../config/config.js";
 import { logConfigUpdated } from "../config/logging.js";
 import { ensureControlUiAssetsBuilt } from "../infra/control-ui-assets.js";
-import { resolvePluginProviders } from "../plugins/providers.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { defaultRuntime } from "../runtime.js";
 import { note } from "../terminal/note.js";
@@ -31,8 +23,6 @@ import { createClackPrompter } from "../wizard/clack-prompter.js";
 import { resolveOnboardingSecretInputString } from "../wizard/onboarding.secret-input.js";
 import type { WizardPrompter } from "../wizard/prompts.js";
 import { WizardCancelledError } from "../wizard/prompts.js";
-import { runProviderPluginAuthMethod } from "./auth-choice.apply.plugin-provider.js";
-import { applyAuthChoice } from "./auth-choice.js";
 import { removeChannelConfigWizard } from "./configure.channels.js";
 import { maybeInstallDaemon } from "./configure.daemon.js";
 import { promptAuthConfig } from "./configure.gateway-auth.js";
@@ -53,7 +43,6 @@ import {
 import { promptGuardModel } from "./guard-model-picker.js";
 import { formatHealthCheckFailure } from "./health-format.js";
 import { healthCommand } from "./health.js";
-import { applyAuthProfileConfig } from "./onboard-auth.js";
 import { noteChannelStatus, setupChannels } from "./onboard-channels.js";
 import {
   applyWizardMetadata,
@@ -72,6 +61,55 @@ import type { AuthChoice } from "./onboard-types.js";
 import { pickAuthMethod, resolveProviderMatch } from "./provider-auth-helpers.js";
 
 type ConfigureSectionChoice = WizardSection | "__continue";
+
+type GuardProviderDeps = {
+  applyAuthChoice: typeof import("./auth-choice.js").applyAuthChoice;
+  applyAuthProfileConfig: typeof import("./onboard-auth.js").applyAuthProfileConfig;
+  ensureAuthProfileStore: typeof import("../agents/auth-profiles.js").ensureAuthProfileStore;
+  hasUsableCustomProviderApiKey: typeof import("../agents/model-auth.js").hasUsableCustomProviderApiKey;
+  listProfilesForProvider: typeof import("../agents/auth-profiles.js").listProfilesForProvider;
+  resolveDefaultAgentWorkspaceDir: typeof import("../agents/workspace.js").resolveDefaultAgentWorkspaceDir;
+  resolveEnvApiKey: typeof import("../agents/model-auth.js").resolveEnvApiKey;
+  resolvePluginProviders: typeof import("../plugins/providers.js").resolvePluginProviders;
+  runProviderPluginAuthMethod: typeof import("./auth-choice.apply.plugin-provider.js").runProviderPluginAuthMethod;
+  upsertAuthProfile: typeof import("../agents/auth-profiles.js").upsertAuthProfile;
+};
+
+let guardProviderDepsPromise: Promise<GuardProviderDeps> | undefined;
+
+async function loadGuardProviderDeps(): Promise<GuardProviderDeps> {
+  guardProviderDepsPromise ??= Promise.all([
+    import("../agents/auth-profiles.js"),
+    import("../agents/model-auth.js"),
+    import("../agents/workspace.js"),
+    import("../plugins/providers.js"),
+    import("./auth-choice.apply.plugin-provider.js"),
+    import("./auth-choice.js"),
+    import("./onboard-auth.js"),
+  ]).then(
+    ([
+      authProfiles,
+      modelAuth,
+      workspace,
+      pluginProviders,
+      providerAuth,
+      authChoice,
+      onboardAuth,
+    ]) => ({
+      applyAuthChoice: authChoice.applyAuthChoice,
+      applyAuthProfileConfig: onboardAuth.applyAuthProfileConfig,
+      ensureAuthProfileStore: authProfiles.ensureAuthProfileStore,
+      hasUsableCustomProviderApiKey: modelAuth.hasUsableCustomProviderApiKey,
+      listProfilesForProvider: authProfiles.listProfilesForProvider,
+      resolveDefaultAgentWorkspaceDir: workspace.resolveDefaultAgentWorkspaceDir,
+      resolveEnvApiKey: modelAuth.resolveEnvApiKey,
+      resolvePluginProviders: pluginProviders.resolvePluginProviders,
+      runProviderPluginAuthMethod: providerAuth.runProviderPluginAuthMethod,
+      upsertAuthProfile: authProfiles.upsertAuthProfile,
+    }),
+  );
+  return guardProviderDepsPromise;
+}
 
 async function resolveGatewaySecretInputForWizard(params: {
   cfg: OpenClawConfig;
@@ -151,7 +189,13 @@ const GUARD_PROVIDER_AUTH_CHOICES: Partial<Record<string, AuthChoice>> = {
   zai: "zai-api-key",
 };
 
-function hasGuardProviderAuth(cfg: OpenClawConfig, provider: string): boolean {
+async function hasGuardProviderAuth(cfg: OpenClawConfig, provider: string): Promise<boolean> {
+  const {
+    ensureAuthProfileStore,
+    hasUsableCustomProviderApiKey,
+    listProfilesForProvider,
+    resolveEnvApiKey,
+  } = await loadGuardProviderDeps();
   const store = ensureAuthProfileStore(resolveOpenClawAgentDir(), {
     allowKeychainPrompt: false,
   });
@@ -167,7 +211,8 @@ function hasGuardProviderAuth(cfg: OpenClawConfig, provider: string): boolean {
   return false;
 }
 
-function resolveGuardWorkspaceDir(cfg: OpenClawConfig): string {
+async function resolveGuardWorkspaceDir(cfg: OpenClawConfig): Promise<string> {
+  const { resolveDefaultAgentWorkspaceDir } = await loadGuardProviderDeps();
   return cfg.agents?.defaults?.workspace ?? resolveDefaultAgentWorkspaceDir();
 }
 
@@ -176,6 +221,7 @@ async function promptGenericGuardProviderApiKey(params: {
   provider: string;
   runtime: RuntimeEnv;
 }): Promise<OpenClawConfig> {
+  const { applyAuthProfileConfig, upsertAuthProfile } = await loadGuardProviderDeps();
   const normalizedProvider = normalizeProviderId(params.provider);
   const tokenInput = guardCancel(
     await text({
@@ -211,7 +257,7 @@ async function ensureGuardProviderAuth(params: {
   prompter: WizardPrompter;
 }): Promise<OpenClawConfig> {
   const normalizedProvider = normalizeProviderId(params.provider);
-  if (hasGuardProviderAuth(params.cfg, normalizedProvider)) {
+  if (await hasGuardProviderAuth(params.cfg, normalizedProvider)) {
     return params.cfg;
   }
 
@@ -237,6 +283,7 @@ async function ensureGuardProviderAuth(params: {
   let nextConfig = params.cfg;
   const authChoice = GUARD_PROVIDER_AUTH_CHOICES[normalizedProvider];
   if (authChoice) {
+    const { applyAuthChoice } = await loadGuardProviderDeps();
     const applied = await applyAuthChoice({
       authChoice,
       config: nextConfig,
@@ -246,9 +293,11 @@ async function ensureGuardProviderAuth(params: {
     });
     nextConfig = applied.config;
   } else {
+    const { resolvePluginProviders, runProviderPluginAuthMethod } = await loadGuardProviderDeps();
+    const workspaceDir = await resolveGuardWorkspaceDir(nextConfig);
     const providers = resolvePluginProviders({
       config: nextConfig,
-      workspaceDir: resolveGuardWorkspaceDir(nextConfig),
+      workspaceDir,
     });
     const pluginProvider = resolveProviderMatch(providers, normalizedProvider);
     if (pluginProvider?.auth.length) {
@@ -272,7 +321,7 @@ async function ensureGuardProviderAuth(params: {
         runtime: params.runtime,
         prompter: params.prompter,
         method,
-        workspaceDir: resolveGuardWorkspaceDir(nextConfig),
+        workspaceDir,
       });
       nextConfig = applied.config;
     } else {
@@ -284,7 +333,7 @@ async function ensureGuardProviderAuth(params: {
     }
   }
 
-  if (!hasGuardProviderAuth(nextConfig, normalizedProvider)) {
+  if (!(await hasGuardProviderAuth(nextConfig, normalizedProvider))) {
     note(
       [
         `Credentials for "${normalizedProvider}" are still missing.`,

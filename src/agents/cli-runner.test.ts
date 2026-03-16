@@ -367,6 +367,125 @@ describe("runCliAgent with process supervisor", () => {
     expect(result.payloads?.[0]?.isError).toBe(true);
     expect(result.payloads?.[0]?.text).toContain("blocked by the content safety guard");
   });
+
+  it("prepends non-blocking input guard payloads to CLI results", async () => {
+    supervisorSpawnMock.mockResolvedValueOnce(
+      createManagedRun({
+        reason: "exit",
+        exitCode: 0,
+        exitSignal: null,
+        durationMs: 25,
+        stdout: "ok",
+        stderr: "",
+        timedOut: false,
+        noOutputTimedOut: false,
+      }),
+    );
+    const cfg = {
+      agents: {
+        defaults: {
+          inputGuardModel: "openai/gpt-4o-mini",
+        },
+      },
+    } satisfies OpenClawConfig;
+    const guardConfig = {
+      provider: "openai",
+      modelId: "gpt-4o-mini",
+      action: "warn" as const,
+      onError: "allow" as const,
+    };
+    resolveInputGuardModelConfigMock.mockReturnValue(guardConfig);
+    applyGuardToInputMock.mockResolvedValueOnce({
+      blocked: false,
+      payloads: [{ text: "⚠️ Careful now.", isError: false }],
+    });
+
+    const result = await runCliAgent({
+      sessionId: "s1",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp",
+      config: cfg,
+      prompt: "hi",
+      provider: "codex-cli",
+      model: "gpt-5.2-codex",
+      timeoutMs: 1_000,
+      runId: "run-input-guard",
+      agentDir: "/tmp/agent",
+    });
+
+    expect(resolveInputGuardModelConfigMock).toHaveBeenCalledWith(cfg);
+    expect(applyGuardToInputMock).toHaveBeenCalledWith("hi", guardConfig, {
+      cfg,
+      agentDir: "/tmp/agent",
+    });
+    expect(result.payloads).toHaveLength(2);
+    expect(result.payloads?.[0]?.text).toBe("⚠️ Careful now.");
+    expect(result.payloads?.[1]?.text).toBe("ok");
+  });
+
+  it("uses rewritten input-guard text for CLI execution when action is redact", async () => {
+    supervisorSpawnMock.mockResolvedValueOnce(
+      createManagedRun({
+        reason: "exit",
+        exitCode: 0,
+        exitSignal: null,
+        durationMs: 25,
+        stdout: "ok",
+        stderr: "",
+        timedOut: false,
+        noOutputTimedOut: false,
+      }),
+    );
+    const cfg = {
+      agents: {
+        defaults: {
+          inputGuardModel: "openai/gpt-4o-mini",
+        },
+      },
+    } satisfies OpenClawConfig;
+    const guardConfig = {
+      provider: "openai",
+      modelId: "gpt-4o-mini",
+      action: "redact" as const,
+      onError: "allow" as const,
+    };
+    const originalPrompt = "unsafe input";
+    const rewrittenPrompt =
+      "The user's message was redacted by the content safety guard. Respond without relying on the removed content.";
+    resolveInputGuardModelConfigMock.mockReturnValue(guardConfig);
+    applyGuardToInputMock.mockResolvedValueOnce({
+      blocked: false,
+      rewrittenText: rewrittenPrompt,
+      payloads: [{ text: "⚠️ Input safety redaction: sensitive", isError: true }],
+    });
+
+    const result = await runCliAgent({
+      sessionId: "s1",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp",
+      config: cfg,
+      prompt: originalPrompt,
+      provider: "codex-cli",
+      model: "gpt-5.2-codex",
+      timeoutMs: 1_000,
+      runId: "run-input-guard-redact",
+      agentDir: "/tmp/agent",
+    });
+
+    const supervisorInput = supervisorSpawnMock.mock.calls[0]?.[0] as {
+      argv?: string[];
+      input?: string;
+    };
+    const launchedPrompt = JSON.stringify({
+      argv: supervisorInput.argv ?? [],
+      input: supervisorInput.input ?? "",
+    });
+
+    expect(launchedPrompt).toContain(rewrittenPrompt);
+    expect(launchedPrompt).not.toContain(originalPrompt);
+    expect(result.payloads?.[0]?.text).toContain("Input safety redaction");
+    expect(result.payloads?.[1]?.text).toBe("ok");
+  });
 });
 
 describe("resolveCliNoOutputTimeoutMs", () => {

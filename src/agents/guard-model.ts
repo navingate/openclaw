@@ -721,6 +721,8 @@ function handleGuardError(config: GuardModelConfig, detail: string): GuardResult
 // ─── Payload screening ─────────────────────────────────────────────────────
 
 const REDACTED_MESSAGE = "⚠️ This response was redacted by the content safety guard.";
+const REDACTED_INPUT_PROMPT =
+  "The user's message was redacted by the content safety guard. Respond without relying on the removed content.";
 const GUARD_UNAVAILABLE_BLOCKED_MESSAGE =
   "⚠️ This response was blocked because the content safety guard is unavailable.";
 const GUARD_TRUNCATED_WARNING_PREFIX = "⚠️ Guard model input was truncated to ";
@@ -913,7 +915,12 @@ export async function applyGuardToInput(
     cfg?: OpenClawConfig;
     agentDir?: string;
   },
-): Promise<{ blocked: boolean; result: GuardResult; payloads: ReplyPayload[] }> {
+): Promise<{
+  blocked: boolean;
+  result: GuardResult;
+  payloads: ReplyPayload[];
+  rewrittenText?: string;
+}> {
   const result = await evaluateGuardWithFallbacks(text, config, params);
 
   if (result.safe) {
@@ -942,6 +949,7 @@ export async function applyGuardToInput(
       return {
         blocked: false,
         result,
+        rewrittenText: REDACTED_INPUT_PROMPT,
         payloads: [
           {
             text:

@@ -749,6 +749,9 @@ describe("guard-model", () => {
       );
 
       expect(result.blocked).toBe(false);
+      expect(result.rewrittenText).toBe(
+        "The user's message was redacted by the content safety guard. Respond without relying on the removed content.",
+      );
       expect(result.payloads).toHaveLength(1);
       expect(result.payloads[0]?.isError).toBe(true);
       expect(result.payloads[0]?.text).toContain("redaction");

@@ -30,17 +30,17 @@ import {
 } from "../context-window-guard.js";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MODEL, DEFAULT_PROVIDER } from "../defaults.js";
 import {
-  resolveOutputGuardModelConfig,
-  resolveInputGuardModelConfig,
-  applyGuardToPayloads,
-  applyGuardToInput,
-} from "../guard-model.js";
-import {
   coerceToFailoverError,
   describeFailoverError,
   FailoverError,
   resolveFailoverStatus,
 } from "../failover-error.js";
+import {
+  resolveOutputGuardModelConfig,
+  resolveInputGuardModelConfig,
+  applyGuardToPayloads,
+  applyGuardToInput,
+} from "../guard-model.js";
 import {
   applyLocalNoAuthHeaderOverride,
   ensureAuthProfileStore,
@@ -927,7 +927,7 @@ export async function runEmbeddedPiAgent(
           attemptedThinking.add(thinkLevel);
           await fs.mkdir(resolvedWorkspace, { recursive: true });
 
-          const prompt =
+          let prompt =
             provider === "anthropic" ? scrubAnthropicRefusalMagic(params.prompt) : params.prompt;
 
           // Input guard screening — check on first iteration before invoking the model
@@ -949,6 +949,9 @@ export async function runEmbeddedPiAgent(
                   },
                 },
               };
+            }
+            if (inputCheck.rewrittenText) {
+              prompt = inputCheck.rewrittenText;
             }
           }
 
