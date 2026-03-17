@@ -16,11 +16,21 @@ function makeTempDir() {
 
 const mkdirSafe = mkdirSafeDir;
 
-function normalizeTestPath(value: string | undefined): string | undefined {
+function normalizePathForAssertion(value: string | undefined): string | undefined {
   if (!value) {
     return value;
   }
-  return path.normalize(value).replace(/\\/g, "/").toLowerCase();
+  return value.replace(/\\/g, "/");
+}
+
+function hasDiagnosticSourceSuffix(
+  diagnostics: Array<{ source?: string }>,
+  suffix: string,
+): boolean {
+  const normalizedSuffix = normalizePathForAssertion(suffix);
+  return diagnostics.some((entry) =>
+    normalizePathForAssertion(entry.source)?.endsWith(normalizedSuffix ?? suffix),
+  );
 }
 
 function buildDiscoveryEnv(stateDir: string): NodeJS.ProcessEnv {
@@ -248,8 +258,10 @@ describe("discoverOpenClawPlugins", () => {
     expect(bundle?.idHint).toBe("sample-bundle");
     expect(bundle?.format).toBe("bundle");
     expect(bundle?.bundleFormat).toBe("codex");
-    expect(normalizeTestPath(bundle?.source)).toBe(normalizeTestPath(bundleDir));
-    expect(normalizeTestPath(bundle?.rootDir)).toBe(normalizeTestPath(fs.realpathSync(bundleDir)));
+    expect(bundle?.source).toBe(bundleDir);
+    expect(normalizePathForAssertion(bundle?.rootDir)).toBe(
+      normalizePathForAssertion(fs.realpathSync(bundleDir)),
+    );
   });
 
   it("auto-detects manifestless Claude bundles from the default layout", async () => {
@@ -303,11 +315,7 @@ describe("discoverOpenClawPlugins", () => {
 
     expect(legacy).toBeDefined();
     expect(legacy?.format).toBe("openclaw");
-    expect(
-      result.diagnostics.some((entry) =>
-        normalizeTestPath(entry.source)?.endsWith(".claude-plugin/plugin.json"),
-      ),
-    ).toBe(true);
+    expect(hasDiagnosticSourceSuffix(result.diagnostics, ".claude-plugin/plugin.json")).toBe(true);
   });
 
   it("falls back to legacy index discovery for configured paths with malformed bundle sidecars", async () => {
@@ -326,11 +334,7 @@ describe("discoverOpenClawPlugins", () => {
 
     expect(legacy).toBeDefined();
     expect(legacy?.format).toBe("openclaw");
-    expect(
-      result.diagnostics.some((entry) =>
-        normalizeTestPath(entry.source)?.endsWith(".codex-plugin/plugin.json"),
-      ),
-    ).toBe(true);
+    expect(hasDiagnosticSourceSuffix(result.diagnostics, ".codex-plugin/plugin.json")).toBe(true);
   });
 
   it("blocks extension entries that escape package directory", async () => {
