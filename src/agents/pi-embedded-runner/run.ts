@@ -39,7 +39,6 @@ import {
   resolveOutputGuardModelConfig,
   resolveInputGuardModelConfig,
   applyGuardToPayloads,
-  applyGuardToInput,
 } from "../guard-model.js";
 import {
   applyLocalNoAuthHeaderOverride,
@@ -76,6 +75,7 @@ import { log } from "./logger.js";
 import { resolveModelAsync } from "./model.js";
 import { runEmbeddedAttempt } from "./run/attempt.js";
 import { createFailoverDecisionLogger } from "./run/failover-observation.js";
+import { applyEmbeddedInputGuardForAttempt } from "./run/input-guard.js";
 import type { RunEmbeddedPiAgentParams } from "./run/params.js";
 import { buildEmbeddedRunPayloads } from "./run/payloads.js";
 import {
@@ -884,6 +884,7 @@ export async function runEmbeddedPiAgent(
       // repeated initialization/connection overhead per attempt.
       ensureContextEnginesInitialized();
       const contextEngine = await resolveContextEngine(params.config);
+      const inputGuardConfig = resolveInputGuardModelConfig(params.config);
       try {
         let authRetryPending = false;
         // Hoisted so the retry-limit error path can use the most recent API total.
@@ -930,10 +931,10 @@ export async function runEmbeddedPiAgent(
           let prompt =
             provider === "anthropic" ? scrubAnthropicRefusalMagic(params.prompt) : params.prompt;
 
-          // Input guard screening — check on first iteration before invoking the model
-          const inputGuardConfig = resolveInputGuardModelConfig(params.config);
-          if (inputGuardConfig && runLoopIterations === 1) {
-            const inputCheck = await applyGuardToInput(prompt, inputGuardConfig, {
+          if (inputGuardConfig) {
+            const inputCheck = await applyEmbeddedInputGuardForAttempt({
+              prompt,
+              inputGuardConfig,
               cfg: params.config,
               agentDir: params.agentDir,
             });
@@ -950,9 +951,7 @@ export async function runEmbeddedPiAgent(
                 },
               };
             }
-            if (inputCheck.rewrittenText) {
-              prompt = inputCheck.rewrittenText;
-            }
+            prompt = inputCheck.prompt;
           }
 
           const outputGuardConfig = resolveOutputGuardModelConfig(params.config);
